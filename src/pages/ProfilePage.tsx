@@ -15,6 +15,7 @@ export function ProfilePage() {
   const { notifications, unreadCount, markRead, markAllRead, refresh: refreshNotifications, reset: resetNotifications } =
     useNotifications();
   const { reputation, refresh: refreshReputation } = useReputation();
+  const { getSavedQuestions, getFollowedQuestions } = useUserData(); // corregido
   const navigate = useNavigate();
 
   const [name, setName] = useState(user?.name ?? "");
@@ -32,14 +33,19 @@ export function ProfilePage() {
   useEffect(() => {
     (async () => {
       if (!user) return;
+
       const qs = await listMyQuestions();
       setMyQuestions(qs.map((q) => ({ id: q.id, title: q.title })));
+
       const ans = await listMyAnswers();
       setMyAnswers(ans);
-      const saved = await userData.getSavedQuestions();
+
+      const saved = await getSavedQuestions(); // corregido
       setSavedQuestionIds(saved);
-      const followed = await userData.getFollowedQuestions();
+
+      const followed = await getFollowedQuestions(); // corregido
       setFollowedQuestionIds(followed);
+
       await refreshNotifications();
       await refreshReputation();
     })();
@@ -202,5 +208,3 @@ export function ProfilePage() {
     </div>
   );
 }
-
-

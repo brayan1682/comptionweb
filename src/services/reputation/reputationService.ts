@@ -1,4 +1,3 @@
-import type { UserReputation } from "../../domain/types";
 import { InMemoryReputationRepository } from "./InMemoryReputationRepository";
 import type { ReputationRepository } from "./ReputationRepository";
 
@@ -27,4 +26,3 @@ class ReputationService {
 }
 
 export const reputationService = new ReputationService(new InMemoryReputationRepository());
-

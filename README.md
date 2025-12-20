@@ -1,133 +1,158 @@
-# Comption (React + backend simulado, Firebase-ready)
+# Comption  
+Aplicación web SPA de preguntas y respuestas orientada a tecnología
+
+---
+
+## Descripción del proyecto
+
+**Comption** es una aplicación web tipo SPA (Single Page Application) orientada al intercambio de conocimiento en el área tecnológica.  
+Permite a los usuarios registrarse, autenticarse, crear preguntas, responderlas y consultar contenido almacenado de forma persistente.
+
+El proyecto está desarrollado con un enfoque técnico, priorizando la integración de módulos, la funcionalidad, la persistencia de datos y el despliegue en la nube, manteniendo un diseño visual básico.
+
+---
+
+## Estado actual
+
+- Proyecto **funcional**
+- Autenticación implementada con **Firebase Authentication**
+- Base de datos **operativa y funcional** en **Firebase Firestore**
+- Aplicación desplegada en **Vercel**
+- Código fuente versionado en **GitHub**
+
+---
 
 ## Objetivo
-App SPA de preguntas y respuestas orientada a tecnología.
 
-- **React + TypeScript**
-- **React Router**
-- **Context API** para estado global (sesión + preguntas)
-- **Arquitectura orientada a servicios/repositories** (simula backend)
-- Lista para reemplazar “in-memory” por **Firebase Auth** y **Firestore** sin tocar componentes.
+Desarrollar una aplicación web modular que integre frontend, autenticación, base de datos y despliegue, aplicando buenas prácticas de desarrollo de software y control de versiones.
 
-> Regla del proyecto: **sin CSS / sin librerías UI / sin diseño visual**. Solo funcionalidad, estructura y navegación.
+---
 
-## Ejecutar en local
+## Tecnologías utilizadas
 
-```bash
-npm install
-npm run dev
-```
+### Frontend
+- React
+- TypeScript
+- Vite
+- React Router
+- Context API para manejo de sesión y estado global
 
-Abrir: `http://localhost:5173`
+### Backend y persistencia
+- Firebase Authentication
+- Firebase Firestore
 
-## Rutas
+### Infraestructura
+- Git y GitHub (control de versiones)
+- Vercel (despliegue en producción)
+
+---
+
+## Funcionalidades principales
+
+- Registro de usuarios
+- Inicio y cierre de sesión
+- Persistencia de sesión
+- Creación de preguntas
+- Visualización de preguntas
+- Visualización de preguntas por identificador
+- Creación de respuestas
+- Protección de rutas privadas
+
+---
+
+## Rutas de la aplicación
 
 ### Públicas
-- `/` Landing
+- `/` → Landing
 - `/login`
 - `/register`
 
-### Privadas (protegidas)
+### Privadas
 - `/home`
 - `/ask`
 - `/question/:id`
 - `/profile`
 - `/help`
 
-## Estructura (alto nivel)
+Las rutas privadas requieren una sesión activa para su acceso.
 
-- `src/services/**`: **backend simulado** (sin componentes aquí)
-  - `src/services/auth/*`: auth tipo Firebase (register/login/logout + onAuthStateChanged)
-  - `src/services/questions/*`: preguntas/respuestas tipo Firestore (create/list/get/addAnswer)
-- `src/app/providers/**`: Context Providers (estado global)
-- `src/routes/**`: guards de rutas (`ProtectedRoute`, `PublicOnlyRoute`)
-- `src/layouts/**`: layout privado (navbar en vistas privadas)
-- `src/pages/**`: pantallas (solo UI/inputs + llamadas al contexto)
+---
 
-## Preparación para Firebase (cómo se reemplaza)
+## Base de datos
 
-- Cambiar `InMemoryAuthRepository` por un `FirebaseAuthRepository`.
-- Cambiar `InMemoryQuestionsRepository` por un `FirestoreQuestionsRepository`.
+El proyecto utiliza **Firebase Firestore** como base de datos NoSQL:
 
-Los componentes **no cambian**: solo cambias la implementación del repositorio usado por `authService` y `questionsService`.
+- Persistencia real de la información
+- Acceso controlado mediante autenticación
+- Reglas de seguridad configuradas en Firebase
+- Uso de variables de entorno para proteger credenciales
 
-## Vercel (SPA)
-Incluye `vercel.json` con rewrite a `index.html` para que React Router funcione en producción.
+---
 
-## Cambios/correcciones vs versión anterior
-- **Doble scroll**: al no usar CSS global ni hacks de overflow, queda un único scroll natural del navegador.
-- **Contraseña con “??”**: inputs de password sin placeholders raros ni scripts; ahora solo `type="password"` y placeholder `********`.
+## Seguridad
 
-# React + TypeScript + Vite
+- Autenticación gestionada por Firebase Authentication
+- Restricción de acceso a módulos privados
+- Protección de datos mediante reglas de Firestore
+- Credenciales no expuestas en el repositorio
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+---
 
-Currently, two official plugins are available:
+## Ejecución en entorno local
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+### Requisitos
+- Node.js (v18 o superior)
+- npm
 
-## React Compiler
+### Instalación y ejecución
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+```bash
+npm install
+npm run dev
+Abrir en el navegador:
+http://localhost:5173
 
-## Expanding the ESLint configuration
+Despliegue en producción
+La aplicación está desplegada como SPA y es accesible públicamente.
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+URL del proyecto:
+https://comptionweb.vercel.app/
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+Control de versiones
+Git para control de versiones
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+GitHub como repositorio remoto
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Repositorio del proyecto:
+https://github.com/brayan1682/comptionweb.git
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Alcance del proyecto
+El diseño visual no es el foco principal del proyecto.
+El énfasis está en:
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+Funcionalidad
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+Integración de módulos
+
+Persistencia de datos
+
+Seguridad
+
+Despliegue en la nube
+
+Uso académico
+Este proyecto hace parte de evidencias académicas del SENA y demuestra competencias en:
+
+Desarrollo de aplicaciones web
+
+Integración de módulos de software
+
+Uso de bases de datos en la nube
+
+Control de versiones
+
+Despliegue de aplicaciones web
+
+Autor
+Brayan Camilo Amaya Cucunubá
+Proyecto académico – SENA

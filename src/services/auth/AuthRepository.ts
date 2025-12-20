@@ -13,6 +13,11 @@ export type LoginInput = {
 
 export type AuthStateListener = (user: User | null) => void;
 
+export type ChangePasswordInput = {
+  currentPassword: string;
+  newPassword: string;
+};
+
 export interface AuthRepository {
   getCurrentUser(): User | null;
   onAuthStateChanged(listener: AuthStateListener): () => void;
@@ -20,6 +25,7 @@ export interface AuthRepository {
   login(input: LoginInput): Promise<User>;
   logout(): Promise<void>;
   updateProfile(input: { name: string }): Promise<User>;
+  changePassword(input: ChangePasswordInput): Promise<void>;
   getUserById(id: string): User | null;
   reset(): void;
 }

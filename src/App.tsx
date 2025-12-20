@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AuthProvider } from "./app/providers/AuthProvider";
 import { QuestionsProvider } from "./app/providers/QuestionsProvider";
@@ -22,8 +23,15 @@ import { HelpPage } from "./pages/HelpPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { AdminRoute } from "./routes/AdminRoute";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { initializeFirestore } from "./firebase/initFirestore";
 
 export default function App() {
+  // Inicializar Firestore al cargar la app (categorías y tags)
+  useEffect(() => {
+    initializeFirestore().catch((error) => {
+      console.error("Error inicializando Firestore:", error);
+    });
+  }, []);
   return (
     <ErrorBoundary>
       <AuthProvider>

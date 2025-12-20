@@ -1,6 +1,6 @@
 import type { Report } from "../../domain/types";
 import { ServiceError } from "../errors";
-import { InMemoryReportsRepository } from "./InMemoryReportsRepository";
+import { FirestoreReportsRepository } from "./FirestoreReportsRepository";
 import type { CreateReportInput, ReportsRepository } from "./ReportsRepository";
 
 class ReportsService {
@@ -38,5 +38,5 @@ class ReportsService {
   }
 }
 
-export const reportsService = new ReportsService(new InMemoryReportsRepository());
+export const reportsService = new ReportsService(new FirestoreReportsRepository());
 

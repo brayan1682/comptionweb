@@ -1,0 +1,166 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper function para verificar si el usuario está autenticado
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    // Helper function para verificar si el usuario es el propietario del documento
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    // Helper function para verificar si el usuario es administrador
+    function isAdmin() {
+      return isAuthenticated() && 
+             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN';
+    }
+    
+    // Colección de usuarios
+    match /users/{userId} {
+      // Lectura: solo el propio usuario o administradores
+      allow read: if isOwner(userId) || isAdmin();
+      
+      // Creación: solo durante el registro (el usuario crea su propio documento)
+      allow create: if isAuthenticated() && 
+                       request.auth.uid == userId &&
+                       request.resource.data.keys().hasAll(['uid', 'displayName', 'name', 'email', 'role', 'level', 'xp', 'rank', 'questionsCount', 'answersCount', 'avgRating', 'createdAt', 'updatedAt']);
+      
+      // Actualización: solo el propio usuario puede actualizar su perfil
+      allow update: if isOwner(userId) && 
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'displayName', 'updatedAt', 'xp', 'level', 'rank', 'questionsCount', 'answersCount', 'avgRating']);
+      
+      // Eliminación: solo administradores
+      allow delete: if isAdmin();
+    }
+    
+    // Colección de preguntas
+    match /questions/{questionId} {
+      // Lectura: pública para todos
+      allow read: if true;
+      
+      // Creación: solo usuarios autenticados
+      allow create: if isAuthenticated() &&
+                       request.resource.data.authorId == request.auth.uid &&
+                       request.resource.data.keys().hasAll(['title', 'description', 'authorId', 'authorName', 'isAnonymous', 'category', 'tags', 'createdAt', 'updatedAt', 'viewedByUserId', 'viewsCount', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'status']);
+      
+      // Actualización: solo el autor o administradores
+      allow update: if (isOwner(resource.data.authorId) || isAdmin()) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'isAnonymous', 'category', 'tags', 'updatedAt', 'viewedByUserId', 'viewsCount', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'trophyAnswerId', 'answersCount', 'status']);
+      
+      // Eliminación: solo administradores
+      allow delete: if isAdmin();
+      
+      // Subcolección de respuestas
+      match /answers/{answerId} {
+        // Lectura: pública
+        allow read: if true;
+        
+        // Creación: solo usuarios autenticados
+        allow create: if isAuthenticated() &&
+                         request.resource.data.authorId == request.auth.uid &&
+                         request.resource.data.keys().hasAll(['questionId', 'content', 'authorId', 'authorName', 'isAnonymous', 'createdAt', 'updatedAt', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'hasTrophy']);
+        
+        // Actualización: solo el autor o administradores
+        allow update: if (isOwner(resource.data.authorId) || isAdmin()) &&
+                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'updatedAt', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'hasTrophy']);
+        
+        // Eliminación: solo administradores
+        allow delete: if isAdmin();
+      }
+    }
+    
+    // Colección de reportes
+    match /reports/{reportId} {
+      // Lectura: solo el reportero o administradores
+      allow read: if isOwner(resource.data.reporterId) || isAdmin();
+      
+      // Creación: solo usuarios autenticados pueden crear reportes
+      allow create: if isAuthenticated() &&
+                       request.resource.data.reporterId == request.auth.uid &&
+                       request.resource.data.keys().hasAll(['reporterId', 'targetType', 'targetId', 'reason', 'description', 'status', 'createdAt']);
+      
+      // Actualización: solo administradores pueden cambiar el estado
+      allow update: if isAdmin() &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedAt']);
+      
+      // Eliminación: solo administradores
+      allow delete: if isAdmin();
+    }
+    
+    // Colección de notificaciones
+    match /notifications/{notificationId} {
+      // Lectura: solo el usuario propietario de la notificación
+      allow read: if isOwner(resource.data.userId);
+      
+      // Creación: el sistema puede crear notificaciones (se hace desde el código del servidor/cliente autenticado)
+      allow create: if isAuthenticated() &&
+                       request.resource.data.keys().hasAll(['id', 'userId', 'type', 'createdAt', 'readAt', 'data']);
+      
+      // Actualización: solo el usuario propietario puede marcar como leída
+      allow update: if isOwner(resource.data.userId) &&
+                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt']);
+      
+      // Eliminación: solo el usuario propietario
+      allow delete: if isOwner(resource.data.userId);
+    }
+    
+    // Colección de reputación
+    match /reputation/{userId} {
+      // Lectura: pública (para mostrar rankings)
+      allow read: if true;
+      
+      // Creación y actualización: solo el sistema (desde el código)
+      allow create, update: if isAuthenticated();
+      
+      // Eliminación: solo administradores
+      allow delete: if isAdmin();
+    }
+    
+    // Colección de preguntas guardadas
+    match /savedQuestions/{savedId} {
+      // Lectura: solo el usuario propietario
+      allow read: if isOwner(resource.data.userId);
+      
+      // Creación: solo usuarios autenticados
+      allow create: if isAuthenticated() &&
+                       request.resource.data.userId == request.auth.uid;
+      
+      // Eliminación: solo el usuario propietario
+      allow delete: if isOwner(resource.data.userId);
+    }
+    
+    // Colección de preguntas seguidas
+    match /followedQuestions/{followedId} {
+      // Lectura: solo el usuario propietario
+      allow read: if isOwner(resource.data.userId);
+      
+      // Creación: solo usuarios autenticados
+      allow create: if isAuthenticated() &&
+                       request.resource.data.userId == request.auth.uid;
+      
+      // Eliminación: solo el usuario propietario
+      allow delete: if isOwner(resource.data.userId);
+    }
+    
+    // Colección de categorías (solo lectura pública)
+    match /categories/{categoryId} {
+      allow read: if true;
+      allow write: if false; // Solo se crean desde el código de inicialización
+    }
+    
+    // Colección de tags (solo lectura pública)
+    match /tags/{tagId} {
+      allow read: if true;
+      allow write: if false; // Solo se crean desde el código de inicialización
+    }
+  }
+}
+
+
+
+

@@ -1,7 +1,7 @@
-import type { AuthRepository, AuthStateListener, LoginInput, RegisterInput } from "./AuthRepository";
-import { InMemoryAuthRepository } from "./InMemoryAuthRepository";
+import type { AuthRepository, AuthStateListener, ChangePasswordInput, LoginInput, RegisterInput } from "./AuthRepository";
+import { FirebaseAuthRepository } from "./FirebaseAuthRepository";
 
-// Listo para reemplazar por un repositorio Firebase (sin tocar componentes).
+// Usando Firebase Auth y Firestore para autenticación.
 class AuthService {
   private repo: AuthRepository;
 
@@ -33,11 +33,15 @@ class AuthService {
     return this.repo.updateProfile(input);
   }
 
+  changePassword(input: ChangePasswordInput) {
+    return this.repo.changePassword(input);
+  }
+
   getUserById(id: string) {
     return this.repo.getUserById(id);
   }
 }
 
-export const authService = new AuthService(new InMemoryAuthRepository());
+export const authService = new AuthService(new FirebaseAuthRepository());
 
 

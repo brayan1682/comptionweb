@@ -32,34 +32,62 @@ export function LoginPage() {
   }
 
   return (
-    <div>
-      <h1>Login</h1>
-      <form onSubmit={onSubmit}>
-        <div>
-          <label>
+    <div style={{ maxWidth: "400px", margin: "50px auto", padding: "20px" }}>
+      <h1 style={{ marginBottom: "30px", textAlign: "center" }}>Iniciar Sesión</h1>
+      <form onSubmit={onSubmit} style={{ padding: "30px", background: "#f9f9f9", borderRadius: "8px" }}>
+        <div style={{ marginBottom: "20px" }}>
+          <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
             Email
-            <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" />
           </label>
+          <input
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            type="email"
+            autoComplete="email"
+            style={{ width: "100%", padding: "10px", fontSize: "16px", border: "1px solid #ddd", borderRadius: "4px" }}
+            required
+          />
         </div>
-        <div>
-          <label>
+        <div style={{ marginBottom: "20px" }}>
+          <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
             Contraseña
-            <input
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              type="password"
-              autoComplete="current-password"
-              placeholder="********"
-            />
           </label>
+          <input
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            type="password"
+            autoComplete="current-password"
+            placeholder="Ingresa tu contraseña"
+            style={{ width: "100%", padding: "10px", fontSize: "16px", border: "1px solid #ddd", borderRadius: "4px" }}
+            required
+          />
         </div>
-        {error ? <p role="alert">{error}</p> : null}
-        <button type="submit" disabled={loading}>
-          {loading ? "Entrando..." : "Entrar"}
+        {error ? (
+          <div role="alert" style={{ padding: "10px", marginBottom: "15px", background: "#f8d7da", color: "#721c24", border: "1px solid #f5c6cb", borderRadius: "4px" }}>
+            {error}
+          </div>
+        ) : null}
+        <button
+          type="submit"
+          disabled={loading}
+          style={{
+            width: "100%",
+            padding: "12px",
+            background: loading ? "#ccc" : "#007bff",
+            color: "white",
+            border: "none",
+            borderRadius: "4px",
+            cursor: loading ? "not-allowed" : "pointer",
+            fontSize: "16px",
+            fontWeight: "bold",
+            marginBottom: "15px"
+          }}
+        >
+          {loading ? "Entrando..." : "Iniciar Sesión"}
         </button>
       </form>
-      <p>
-        ¿No tienes cuenta? <Link to="/register">Regístrate</Link>
+      <p style={{ textAlign: "center", marginTop: "20px" }}>
+        ¿No tienes cuenta? <Link to="/register" style={{ color: "#007bff", textDecoration: "none" }}>Regístrate</Link>
       </p>
     </div>
   );

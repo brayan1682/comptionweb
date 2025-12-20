@@ -10,6 +10,7 @@ type AuthContextValue = {
   login: (input: LoginInput) => Promise<void>;
   register: (input: RegisterInput) => Promise<void>;
   updateProfile: (input: { name: string }) => Promise<void>;
+  changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -41,6 +42,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const updated = await authService.updateProfile(input);
         // Mantener coherencia: actualizar nombre denormalizado en preguntas/respuestas
         await questionsService.syncAuthorName(updated.id, updated.name);
+      },
+      changePassword: async (input) => {
+        await authService.changePassword(input);
       },
       logout: async () => {
         await authService.logout();

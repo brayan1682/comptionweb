@@ -1,7 +1,7 @@
 import type { User } from "../../domain/types";
 import { ServiceError } from "../errors";
 import { isEmail, newId, normalizeEmail, nowIso } from "../utils";
-import type { AuthRepository, AuthStateListener, LoginInput, RegisterInput } from "./AuthRepository";
+import type { AuthRepository, AuthStateListener, ChangePasswordInput, LoginInput, RegisterInput } from "./AuthRepository";
 
 type StoredUser = User & { password: string };
 
@@ -86,6 +86,19 @@ export class InMemoryAuthRepository implements AuthRepository {
     this.emit();
     const { password: _pw, ...safe } = me;
     return safe;
+  }
+
+  async changePassword(input: ChangePasswordInput): Promise<void> {
+    const me = this.users.find((x) => x.id === this.currentUserId);
+    if (!me) throw new ServiceError("auth/not-authenticated", "No autenticado");
+    if (me.password !== input.currentPassword) {
+      throw new ServiceError("auth/invalid-credential", "La contraseña actual es incorrecta");
+    }
+    if (input.newPassword.length < 8) {
+      throw new ServiceError("auth/weak-password", "La nueva contraseña debe tener al menos 8 caracteres");
+    }
+    me.password = input.newPassword;
+    me.updatedAt = nowIso();
   }
 
   reset() {

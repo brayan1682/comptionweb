@@ -3,41 +3,24 @@ export const CATEGORIES = [
   "Frontend",
   "Backend",
   "Bases de datos",
-  "Desarrollo móvil",
+  "Seguridad",
   "DevOps",
-  "Seguridad"
+  "Mobile",
+  "Errores y debugging",
+  "Despliegue",
+  "General"
 ] as const;
 
 export type Category = (typeof CATEGORIES)[number];
 
 // Tags predefinidos (sin creación libre por usuarios)
 export const PREDEFINED_TAGS = [
+  // Frontend
   "JavaScript",
   "TypeScript",
   "React",
   "Vue",
   "Angular",
-  "Node.js",
-  "Python",
-  "Java",
-  "C#",
-  "PHP",
-  "SQL",
-  "MongoDB",
-  "PostgreSQL",
-  "MySQL",
-  "Redis",
-  "Docker",
-  "Kubernetes",
-  "AWS",
-  "Azure",
-  "Git",
-  "CI/CD",
-  "Testing",
-  "API",
-  "REST",
-  "GraphQL",
-  "WebSocket",
   "HTML",
   "CSS",
   "SASS",
@@ -45,21 +28,68 @@ export const PREDEFINED_TAGS = [
   "Bootstrap",
   "Responsive",
   "PWA",
+  "Frontend",
+  // Backend
+  "Node.js",
+  "Python",
+  "Java",
+  "C#",
+  "PHP",
+  "Backend",
+  "API",
+  "REST",
+  "GraphQL",
+  "WebSocket",
+  // Cloud
+  "AWS",
+  "Azure",
+  "Cloud",
+  "Firebase",
+  // Auth
+  "Autenticación",
+  "Auth",
+  "JWT",
+  // Rendimiento
+  "Performance",
+  "Optimización",
+  "Rendimiento",
+  // Seguridad
+  "Seguridad",
+  "Criptografía",
+  "HTTPS",
+  // Bases de datos
+  "SQL",
+  "MongoDB",
+  "PostgreSQL",
+  "MySQL",
+  "Redis",
+  "Bases de datos",
+  // DevOps
+  "Docker",
+  "Kubernetes",
+  "Git",
+  "CI/CD",
+  "DevOps",
+  // Mobile
   "iOS",
   "Android",
   "React Native",
   "Flutter",
-  "Firebase",
-  "Autenticación",
-  "Seguridad",
-  "Performance",
+  "Mobile",
+  // Testing
+  "Testing",
+  "Jest",
+  "Unit Testing",
+  // Otros
   "SEO",
   "Accesibilidad",
   "Arquitectura",
   "Clean Code",
   "Design Patterns",
   "Algoritmos",
-  "Estructuras de datos"
+  "Estructuras de datos",
+  "Debugging",
+  "Errores"
 ] as const;
 
 export type Tag = (typeof PREDEFINED_TAGS)[number];

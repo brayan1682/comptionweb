@@ -1,4 +1,4 @@
-import { InMemoryUserDataRepository } from "./InMemoryUserDataRepository";
+import { FirestoreUserDataRepository } from "./FirestoreUserDataRepository";
 import type { UserDataRepository } from "./UserDataRepository";
 
 class UserDataService {
@@ -49,5 +49,5 @@ class UserDataService {
   }
 }
 
-export const userDataService = new UserDataService(new InMemoryUserDataRepository());
+export const userDataService = new UserDataService(new FirestoreUserDataRepository());
 

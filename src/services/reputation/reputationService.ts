@@ -1,4 +1,4 @@
-import { InMemoryReputationRepository } from "./InMemoryReputationRepository";
+import { FirestoreReputationRepository } from "./FirestoreReputationRepository";
 import type { ReputationRepository } from "./ReputationRepository";
 
 class ReputationService {
@@ -25,4 +25,4 @@ class ReputationService {
   }
 }
 
-export const reputationService = new ReputationService(new InMemoryReputationRepository());
+export const reputationService = new ReputationService(new FirestoreReputationRepository());

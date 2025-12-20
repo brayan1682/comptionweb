@@ -1,5 +1,5 @@
 import type { Notification } from "../../domain/notifications";
-import { InMemoryNotificationsRepository } from "./InMemoryNotificationsRepository";
+import { FirestoreNotificationsRepository } from "./FirestoreNotificationsRepository";
 import type { NotificationsRepository } from "./NotificationsRepository";
 
 class NotificationsService {
@@ -34,6 +34,6 @@ class NotificationsService {
   }
 }
 
-export const notificationsService = new NotificationsService(new InMemoryNotificationsRepository());
+export const notificationsService = new NotificationsService(new FirestoreNotificationsRepository());
 
 

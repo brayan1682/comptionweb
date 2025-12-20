@@ -1,6 +1,6 @@
 import type { User } from "../../domain/types";
 import { ServiceError } from "../errors";
-import { InMemoryQuestionsRepository } from "./InMemoryQuestionsRepository";
+import { FirestoreQuestionsRepository } from "./FirestoreQuestionsRepository";
 import type { AddAnswerInput, CreateQuestionInput, QuestionsRepository } from "./QuestionsRepository";
 
 class QuestionsService {
@@ -87,6 +87,6 @@ class QuestionsService {
   }
 }
 
-export const questionsService = new QuestionsService(new InMemoryQuestionsRepository());
+export const questionsService = new QuestionsService(new FirestoreQuestionsRepository());
 
 

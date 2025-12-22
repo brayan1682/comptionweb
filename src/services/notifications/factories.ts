@@ -36,5 +36,27 @@ export function answerRatedNotification(input: {
   };
 }
 
+export function levelUpNotification(input: { userId: string; level: number; rank: string }): Notification {
+  return {
+    id: newId(),
+    userId: input.userId,
+    type: "reputation/level-up",
+    createdAt: nowIso(),
+    readAt: null,
+    data: { level: input.level, rank: input.rank }
+  };
+}
+
+export function rankUpNotification(input: { userId: string; level: number; rank: string }): Notification {
+  return {
+    id: newId(),
+    userId: input.userId,
+    type: "reputation/rank-up",
+    createdAt: nowIso(),
+    readAt: null,
+    data: { level: input.level, rank: input.rank }
+  };
+}
+
 
 

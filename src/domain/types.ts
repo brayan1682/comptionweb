@@ -5,6 +5,12 @@ export type User = {
   name: string;
   email: string;
   role: Role;
+  level: number; // Nivel del usuario (inicia en 1)
+  xp: number; // Experiencia acumulada (inicia en 0)
+  rank: string; // Rango actual (inicia en "Novato")
+  questionsCount: number; // Contador de preguntas creadas
+  answersCount: number; // Contador de respuestas dadas
+  avgRating: number; // Calificación promedio
   createdAt: string; // ISO (Firestore Timestamp -> string en demo)
   updatedAt: string; // ISO
 };

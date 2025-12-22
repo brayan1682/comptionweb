@@ -32,7 +32,7 @@ type QuestionsContextValue = {
 const QuestionsContext = createContext<QuestionsContextValue | null>(null);
 
 export function QuestionsProvider({ children }: { children: React.ReactNode }) {
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
   const [questions, setQuestions] = useState<Question[]>([]);
 
   useEffect(() => {
@@ -56,8 +56,29 @@ export function QuestionsProvider({ children }: { children: React.ReactNode }) {
       },
       createQuestion: async (input: CreateQuestionInput) => {
         const q = await questionsService.createQuestion(input, user);
-        const list = await questionsService.listQuestions();
-        setQuestions(list);
+        // Refrescar el usuario para actualizar questionsCount
+        try {
+          await refreshUser();
+        } catch (refreshUserError) {
+          console.warn("No se pudo refrescar el usuario después de crear la pregunta:", refreshUserError);
+        }
+        // Refrescar la lista de preguntas para que aparezca la nueva pregunta
+        // Si falla, agregar la pregunta manualmente al estado local como fallback
+        try {
+          const list = await questionsService.listQuestions();
+          setQuestions(list);
+        } catch (refreshError) {
+          // Si falla el refresh, agregar la pregunta manualmente al estado local
+          // Esto asegura que la pregunta aparezca inmediatamente aunque falle el refresh
+          setQuestions((prev) => {
+            // Evitar duplicados
+            if (prev.some(p => p.id === q.id)) {
+              return prev;
+            }
+            return [q, ...prev];
+          });
+          console.warn("No se pudo refrescar la lista de preguntas, pero la pregunta se creó correctamente:", refreshError);
+        }
         return q;
       },
       addAnswer: async (input: AddAnswerInput) => {
@@ -100,6 +121,12 @@ export function QuestionsProvider({ children }: { children: React.ReactNode }) {
       },
       deleteQuestion: async (questionId: string) => {
         await questionsService.deleteQuestion(questionId, user);
+        // Refrescar el usuario para actualizar questionsCount
+        try {
+          await refreshUser();
+        } catch (refreshUserError) {
+          console.warn("No se pudo refrescar el usuario después de borrar la pregunta:", refreshUserError);
+        }
         const list = await questionsService.listQuestions();
         setQuestions(list);
       },
@@ -113,7 +140,7 @@ export function QuestionsProvider({ children }: { children: React.ReactNode }) {
         setQuestions([]);
       }
     }),
-    [questions, user]
+    [questions, user, refreshUser]
   );
 
   return <QuestionsContext.Provider value={value}>{children}</QuestionsContext.Provider>;

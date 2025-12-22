@@ -1,4 +1,4 @@
-export type NotificationType = "question/new-answer" | "answer/rated";
+export type NotificationType = "question/new-answer" | "answer/rated" | "reputation/level-up" | "reputation/rank-up";
 
 export type Notification = {
   id: string;
@@ -8,7 +8,8 @@ export type Notification = {
   readAt: string | null;
   data:
     | { questionId: string; answerId: string; fromUserId: string }
-    | { questionId: string; answerId: string; fromUserId: string; rating: number; ratingAvg: number };
+    | { questionId: string; answerId: string; fromUserId: string; rating: number; ratingAvg: number }
+    | { level: number; rank: string };
 };
 
 

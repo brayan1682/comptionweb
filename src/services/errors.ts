@@ -5,6 +5,7 @@ export type ServiceErrorCode =
   | "auth/invalid-email"
   | "auth/not-authenticated"
   | "questions/not-found"
+  | "questions/create-failed"
   | "validation/invalid-argument";
 
 export class ServiceError extends Error {

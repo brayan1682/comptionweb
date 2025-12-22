@@ -72,6 +72,10 @@ class QuestionsService {
     return this.repo.syncAuthorName(authorId, newName);
   }
 
+  syncQuestionsCount(userId: string) {
+    return this.repo.syncQuestionsCount(userId);
+  }
+
   deleteQuestion(questionId: string, adminUser: User | null) {
     if (!adminUser) throw new ServiceError("auth/not-authenticated", "Debes iniciar sesión");
     return this.repo.deleteQuestion(questionId, adminUser);

@@ -74,17 +74,19 @@ export class FirestoreQuestionsRepository implements QuestionsRepository {
     // Ordenar respuestas por fecha (más nuevas primero)
     answers.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 
+    // Asegurar que todos los campos obligatorios existan (compatibilidad con preguntas antiguas)
+    const now = nowIso();
     return {
       id: questionId,
-      title: data.title,
-      description: data.description,
-      authorId: data.authorId,
-      authorName: data.authorName,
+      title: data.title || "Sin título",
+      description: data.description || "",
+      authorId: data.authorId || "",
+      authorName: data.authorName || "Usuario desconocido",
       isAnonymous: data.isAnonymous || false,
-      category: data.category,
+      category: data.category || "General",
       tags: data.tags || [],
-      createdAt: this.timestampToIso(data.createdAt),
-      updatedAt: this.timestampToIso(data.updatedAt),
+      createdAt: data.createdAt ? this.timestampToIso(data.createdAt) : now,
+      updatedAt: data.updatedAt ? this.timestampToIso(data.updatedAt) : now,
       answers,
       viewedByUserId: data.viewedByUserId || {},
       viewsCount: data.viewsCount || 0,
@@ -155,11 +157,42 @@ export class FirestoreQuestionsRepository implements QuestionsRepository {
   }
 
   async getQuestionById(id: string): Promise<Question | null> {
-    const questionDoc = await getDoc(doc(db, "questions", id));
-    if (!questionDoc.exists()) {
+    // Normalizar el id: eliminar espacios y asegurar que sea string
+    const normalizedId = id ? String(id).trim() : "";
+    
+    if (!normalizedId) {
+      console.warn("[FirestoreQuestionsRepository] getQuestionById: ID vacío o inválido");
       return null;
     }
-    return await this.firestoreQuestionToQuestion(questionDoc);
+
+    console.log("[FirestoreQuestionsRepository] getQuestionById: Buscando pregunta con ID:", normalizedId, "(tipo:", typeof normalizedId, ", longitud:", normalizedId.length, ")");
+
+    // Usar estrictamente doc(db, "questions", questionId) - NO usar where ni otras consultas
+    const questionRef = doc(db, "questions", normalizedId);
+    let questionDoc = await getDoc(questionRef);
+    
+    // Si no existe, esperar un poco y reintentar (para casos de propagación de Firestore)
+    // Esto es especialmente importante justo después de crear una pregunta
+    if (!questionDoc.exists()) {
+      // Reintentar hasta 5 veces con esperas progresivas
+      let attempts = 0;
+      const maxAttempts = 5;
+      while (!questionDoc.exists() && attempts < maxAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 200 * (attempts + 1))); // Esperas progresivas: 200ms, 400ms, 600ms, 800ms, 1000ms
+        questionDoc = await getDoc(questionRef);
+        attempts++;
+      }
+    }
+
+    // Solo retornar null si Firestore respondió y el documento realmente no existe
+    if (!questionDoc.exists()) {
+      console.warn(`[FirestoreQuestionsRepository] getQuestionById: Pregunta con ID "${normalizedId}" no encontrada en Firestore (doc.exists() === false) después de ${attempts} intentos`);
+      return null;
+    }
+    
+    const question = await this.firestoreQuestionToQuestion(questionDoc);
+    console.log("[FirestoreQuestionsRepository] getQuestionById: Pregunta encontrada con ID:", question.id, "(tipo:", typeof question.id, ", longitud:", question.id.length, ")");
+    return question;
   }
 
   async createQuestion(input: CreateQuestionInput, author: User): Promise<Question> {
@@ -208,33 +241,90 @@ export class FirestoreQuestionsRepository implements QuestionsRepository {
       status: "active" as const,
     };
 
-    await setDoc(questionRef, questionData);
+    try {
+      await setDoc(questionRef, questionData);
+    } catch (error: any) {
+      console.error("Error al crear pregunta en Firestore:", error);
+      throw new ServiceError(
+        "questions/create-failed",
+        error?.message || "No se pudo crear la pregunta. Por favor, intenta nuevamente."
+      );
+    }
 
-    // Actualizar contador de preguntas del usuario
-    const userRef = doc(db, "users", author.id);
-    await updateDoc(userRef, {
-      questionsCount: increment(1),
-    });
+    // Actualizar contador de preguntas del usuario y dar XP
+    try {
+      const userRef = doc(db, "users", author.id);
+      const userDoc = await getDoc(userRef);
+      
+      // Asegurar que questionsCount exista (inicializar si no existe)
+      if (userDoc.exists()) {
+        const userData = userDoc.data();
+        const currentCount = userData.questionsCount ?? 0;
+        await updateDoc(userRef, {
+          questionsCount: currentCount + 1,
+        });
+      } else {
+        // Si el documento no existe, crearlo con questionsCount = 1
+        await setDoc(userRef, {
+          questionsCount: 1,
+          level: 1,
+          xp: 0,
+          rank: "Novato",
+          answersCount: 0,
+          avgRating: 0,
+        }, { merge: true });
+      }
+      
+      // Dar XP por crear pregunta
+      await reputationService.addXp(author.id, XP_VALUES.QUESTION_PUBLISHED);
+    } catch (error: any) {
+      console.error("Error actualizando contador de preguntas del usuario:", error);
+      // No lanzamos error aquí porque la pregunta ya está creada
+    }
 
-    return {
-      id: questionRef.id,
-      title,
-      description,
-      authorId: author.id,
-      authorName: author.name,
-      isAnonymous: Boolean(input.isAnonymous),
-      category: input.category,
-      tags: [...tags],
-      createdAt: now,
-      updatedAt: now,
-      answers: [],
-      viewedByUserId: {},
-      viewsCount: 0,
-      ratingsByUserId: {},
-      ratingAvg: 0,
-      ratingCount: 0,
-      trophyAnswerId: null,
-    };
+    // Esperar a que Firestore confirme la creación antes de retornar
+    // Verificar que el documento existe antes de continuar
+    let verifyDoc = await getDoc(questionRef);
+    let attempts = 0;
+    while (!verifyDoc.exists() && attempts < 5) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+      verifyDoc = await getDoc(questionRef);
+      attempts++;
+    }
+
+    if (!verifyDoc.exists()) {
+      console.error("Error: La pregunta no se pudo verificar después de crearla");
+      throw new ServiceError("questions/create-failed", "No se pudo verificar la creación de la pregunta");
+    }
+
+    // Usar firestoreQuestionToQuestion para asegurar consistencia con getQuestionById
+    // Si falla, construir el objeto Question manualmente como fallback
+    try {
+      return await this.firestoreQuestionToQuestion(verifyDoc);
+    } catch (error: any) {
+      console.warn("Error al convertir pregunta desde Firestore, usando fallback:", error);
+      // Fallback: construir Question manualmente con los datos del documento
+      const data = verifyDoc.data();
+      return {
+        id: questionRef.id,
+        title: data.title || title,
+        description: data.description || description,
+        authorId: data.authorId || author.id,
+        authorName: data.authorName || author.name,
+        isAnonymous: data.isAnonymous || Boolean(input.isAnonymous),
+        category: data.category || input.category,
+        tags: data.tags || [...tags],
+        createdAt: data.createdAt ? this.timestampToIso(data.createdAt) : now,
+        updatedAt: data.updatedAt ? this.timestampToIso(data.updatedAt) : now,
+        answers: [], // Nueva pregunta sin respuestas aún
+        viewedByUserId: data.viewedByUserId || {},
+        viewsCount: data.viewsCount || 0,
+        ratingsByUserId: data.ratingsByUserId || {},
+        ratingAvg: data.ratingAvg || 0,
+        ratingCount: data.ratingCount || 0,
+        trophyAnswerId: data.trophyAnswerId || null,
+      };
+    }
   }
 
   async addAnswer(input: AddAnswerInput, author: User): Promise<Answer> {
@@ -275,9 +365,26 @@ export class FirestoreQuestionsRepository implements QuestionsRepository {
 
     // Actualizar contador de respuestas del usuario
     const userRef = doc(db, "users", author.id);
-    await updateDoc(userRef, {
-      answersCount: increment(1),
-    });
+    const userDoc = await getDoc(userRef);
+    
+    // Asegurar que answersCount exista (inicializar si no existe)
+    if (userDoc.exists()) {
+      const userData = userDoc.data();
+      const currentCount = userData.answersCount ?? 0;
+      await updateDoc(userRef, {
+        answersCount: currentCount + 1,
+      });
+    } else {
+      // Si el documento no existe, crearlo con answersCount = 1
+      await setDoc(userRef, {
+        answersCount: 1,
+        level: 1,
+        xp: 0,
+        rank: "Novato",
+        questionsCount: 0,
+        avgRating: 0,
+      }, { merge: true });
+    }
 
     await reputationService.addXp(author.id, XP_VALUES.ANSWER_PUBLISHED);
 
@@ -554,6 +661,40 @@ export class FirestoreQuestionsRepository implements QuestionsRepository {
     }
     
     return items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  async syncQuestionsCount(userId: string): Promise<number> {
+    // Contar las preguntas reales del usuario en Firestore
+    const questionsRef = collection(db, "questions");
+    const q = query(
+      questionsRef,
+      where("authorId", "==", userId),
+      where("status", "==", "active")
+    );
+    const snapshot = await getDocs(q);
+    const realCount = snapshot.size;
+
+    // Actualizar el contador en el documento del usuario
+    const userRef = doc(db, "users", userId);
+    const userDoc = await getDoc(userRef);
+    
+    if (userDoc.exists()) {
+      await updateDoc(userRef, {
+        questionsCount: realCount,
+      });
+    } else {
+      // Si el documento no existe, crearlo
+      await setDoc(userRef, {
+        questionsCount: realCount,
+        level: 1,
+        xp: 0,
+        rank: "Novato",
+        answersCount: 0,
+        avgRating: 0,
+      }, { merge: true });
+    }
+
+    return realCount;
   }
 
   async syncAuthorName(authorId: string, newName: string): Promise<void> {

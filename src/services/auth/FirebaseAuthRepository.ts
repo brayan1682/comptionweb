@@ -24,6 +24,7 @@ export class FirebaseAuthRepository implements AuthRepository {
   private listeners = new Set<AuthStateListener>();
   private unsubscribeFirebase: (() => void) | null = null;
   private currentUser: User | null = null;
+  private isInitialized = false;
 
   constructor() {
     // Escuchar cambios de autenticación de Firebase
@@ -32,9 +33,11 @@ export class FirebaseAuthRepository implements AuthRepository {
         // Obtener datos del usuario desde Firestore
         const user = await this.getUserFromFirestore(firebaseUser.uid);
         this.currentUser = user;
+        this.isInitialized = true;
         this.emit(user);
       } else {
         this.currentUser = null;
+        this.isInitialized = true;
         this.emit(null);
       }
     });
@@ -47,13 +50,55 @@ export class FirebaseAuthRepository implements AuthRepository {
         return null;
       }
       const data = userDoc.data();
+      const now = nowIso();
+      
+      // Asegurar que todos los campos obligatorios existan (compatibilidad con usuarios antiguos)
+      const defaults = {
+        level: 1,
+        xp: 0,
+        rank: "Novato",
+        questionsCount: 0,
+        answersCount: 0,
+        avgRating: 0,
+        createdAt: data.createdAt || now,
+        updatedAt: data.updatedAt || now,
+      };
+
+      // Si faltan campos, actualizarlos en Firestore
+      const needsUpdate = !data.level || !data.xp || !data.rank || 
+                         data.questionsCount === undefined || 
+                         data.answersCount === undefined ||
+                         data.avgRating === undefined;
+
+      if (needsUpdate) {
+        try {
+          await updateDoc(doc(db, "users", uid), {
+            level: data.level ?? defaults.level,
+            xp: data.xp ?? defaults.xp,
+            rank: data.rank ?? defaults.rank,
+            questionsCount: data.questionsCount ?? defaults.questionsCount,
+            answersCount: data.answersCount ?? defaults.answersCount,
+            avgRating: data.avgRating ?? defaults.avgRating,
+            updatedAt: now,
+          });
+        } catch (updateError) {
+          console.warn("No se pudieron actualizar campos faltantes del usuario:", updateError);
+        }
+      }
+
       return {
         id: uid,
-        name: data.name,
-        email: data.email,
+        name: data.name || data.displayName || "",
+        email: data.email || "",
         role: data.role || "USER",
-        createdAt: data.createdAt,
-        updatedAt: data.updatedAt,
+        level: data.level ?? defaults.level,
+        xp: data.xp ?? defaults.xp,
+        rank: data.rank ?? defaults.rank,
+        questionsCount: data.questionsCount ?? defaults.questionsCount,
+        answersCount: data.answersCount ?? defaults.answersCount,
+        avgRating: data.avgRating ?? defaults.avgRating,
+        createdAt: data.createdAt || defaults.createdAt,
+        updatedAt: data.updatedAt || defaults.updatedAt,
       };
     } catch (error) {
       console.error("Error obteniendo usuario de Firestore:", error);
@@ -71,8 +116,11 @@ export class FirebaseAuthRepository implements AuthRepository {
 
   onAuthStateChanged(listener: AuthStateListener): () => void {
     this.listeners.add(listener);
-    // Emitir estado actual inmediatamente (usando el usuario cacheado si está disponible)
-    listener(this.currentUser);
+    // Solo emitir estado actual si ya se inicializó Firebase Auth
+    // Si no está inicializado, esperar a que Firebase Auth verifique el estado
+    if (this.isInitialized) {
+      listener(this.currentUser);
+    }
     return () => this.listeners.delete(listener);
   }
 
@@ -276,6 +324,16 @@ export class FirebaseAuthRepository implements AuthRepository {
     // Por ahora retornamos null y confiamos en que se use onAuthStateChanged o se haga una llamada asíncrona
     // En una implementación completa, esto podría cachear usuarios o hacer una llamada síncrona
     return null;
+  }
+
+  async refreshCurrentUser(): Promise<void> {
+    // Refrescar el usuario actual desde Firestore
+    const firebaseUser = auth.currentUser;
+    if (firebaseUser) {
+      const user = await this.getUserFromFirestore(firebaseUser.uid);
+      this.currentUser = user;
+      this.emit(user);
+    }
   }
 
   reset(): void {

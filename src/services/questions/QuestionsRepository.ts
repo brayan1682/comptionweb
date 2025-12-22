@@ -27,6 +27,7 @@ export interface QuestionsRepository {
   listQuestionsByAuthorId(authorId: string): Promise<Question[]>;
   listAnswersByAuthorId(authorId: string): Promise<Array<{ questionId: string; answerId: string; content: string; createdAt: string }>>;
   syncAuthorName(authorId: string, newName: string): Promise<void>;
+  syncQuestionsCount(userId: string): Promise<number>;
   deleteQuestion(questionId: string, adminUser: User): Promise<void>;
   deleteAnswer(questionId: string, answerId: string, adminUser: User): Promise<void>;
   reset(): void;

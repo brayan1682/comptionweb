@@ -17,6 +17,7 @@ export function AskPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [showPreventiveSearch, setShowPreventiveSearch] = useState(true);
+  const [showForm, setShowForm] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchFilter, setSearchFilter] = useState<"all" | "no-answers" | "best-rated" | "recent">("all");
   const [suggestedQuestions, setSuggestedQuestions] = useState<Question[]>([]);
@@ -68,10 +69,22 @@ export function AskPage() {
         return;
       }
       const q = await createQuestion({ title, description, isAnonymous, category, tags: selectedTags });
-      navigate(`/question/${q.id}`, { replace: true });
+      // Limpiar el estado de error si la creación fue exitosa
+      setError(null);
+      // Solo redirigir después de que Firestore confirme la creación
+      // El id ya viene del documento creado en Firestore (questionRef.id)
+      if (q && q.id) {
+        navigate(`/question/${q.id}`, { replace: true });
+      } else {
+        setError("No se pudo obtener el ID de la pregunta creada");
+      }
     } catch (err) {
-      if (err instanceof ServiceError) setError(err.message);
-      else setError("No se pudo crear la pregunta");
+      // Solo mostrar error si realmente falló la creación
+      if (err instanceof ServiceError) {
+        setError(err.message);
+      } else {
+        setError("No se pudo crear la pregunta");
+      }
     } finally {
       setLoading(false);
     }
@@ -131,14 +144,17 @@ export function AskPage() {
           ) : null}
           <button
             type="button"
-            onClick={() => setShowPreventiveSearch(false)}
+            onClick={() => {
+              setShowPreventiveSearch(false);
+              setShowForm(true);
+            }}
             style={{ padding: "10px 20px", background: "#007bff", color: "white", border: "none", borderRadius: "4px", cursor: "pointer" }}
           >
             Continuar creando pregunta
           </button>
         </div>
       ) : null}
-      {!showPreventiveSearch || suggestedQuestions.length === 0 ? (
+      {showForm ? (
         <form onSubmit={onSubmit} style={{ padding: "20px", background: "#f9f9f9", borderRadius: "8px" }}>
           <div style={{ marginBottom: "20px" }}>
             <label style={{ display: "block", marginBottom: "5px", fontWeight: "bold" }}>
@@ -237,7 +253,7 @@ export function AskPage() {
               background: loading || selectedTags.length < 1 || selectedTags.length > 5 ? "#ccc" : "#007bff",
               color: "white",
               border: "none",
-              borderRadius: "4px",
+              borderRadius: "6px",
               cursor: loading || selectedTags.length < 1 || selectedTags.length > 5 ? "not-allowed" : "pointer",
               fontSize: "16px",
               fontWeight: "bold"

@@ -10,6 +10,8 @@ import { nowIso } from "../utils";
 import { calculateLevel, calculateRank } from "./reputationUtils";
 import type { ReputationRepository } from "./ReputationRepository";
 import { db } from "../../firebase/firebase";
+import { notificationsService } from "../notifications/notificationsService";
+import { levelUpNotification, rankUpNotification } from "../notifications/factories";
 
 export class FirestoreReputationRepository implements ReputationRepository {
   private timestampToIso(timestamp: any): string {
@@ -65,8 +67,13 @@ export class FirestoreReputationRepository implements ReputationRepository {
     const repDoc = await getDoc(repRef);
     
     let currentXp = 0;
+    let oldLevel = 1;
+    let oldRank = "Novato";
     if (repDoc.exists()) {
-      currentXp = repDoc.data().xp || 0;
+      const data = repDoc.data();
+      currentXp = data.xp || 0;
+      oldLevel = data.level || 1;
+      oldRank = data.rank || "Novato";
     }
     
     const newXp = currentXp + xpAmount;
@@ -102,6 +109,14 @@ export class FirestoreReputationRepository implements ReputationRepository {
         level: newLevel,
         rank: newRank,
       });
+    }
+
+    // Notificar si subió de nivel o rango
+    if (newLevel > oldLevel) {
+      await notificationsService.create(levelUpNotification({ userId, level: newLevel, rank: newRank }));
+    }
+    if (newRank !== oldRank) {
+      await notificationsService.create(rankUpNotification({ userId, level: newLevel, rank: newRank }));
     }
 
     return await this.getByUserId(userId) as UserReputation;

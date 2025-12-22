@@ -7,12 +7,13 @@ import { useNotifications } from "../app/providers/NotificationsProvider";
 import { useReputation } from "../app/providers/ReputationProvider";
 import { useUserData } from "../app/providers/UserDataProvider";
 import { ServiceError } from "../services/errors";
-import { xpForNextLevel } from "../services/reputation/reputationUtils";
+import { questionsService } from "../services/questions/questionsService";
+import { xpForNextLevel, xpRequiredForLevel, xpNeededForNextLevel, getLevelProgress } from "../services/reputation/reputationUtils";
 
 type ProfileTab = "view" | "edit" | "password";
 
 export function ProfilePage() {
-  const { user, updateProfile, changePassword, logout } = useAuth();
+  const { user, updateProfile, changePassword, logout, refreshUser } = useAuth();
   const { listMyQuestions, listMyAnswers, reset: resetQuestions } = useQuestions();
   const { notifications, unreadCount, markRead, markAllRead, refresh: refreshNotifications, reset: resetNotifications } =
     useNotifications();
@@ -47,6 +48,15 @@ export function ProfilePage() {
   useEffect(() => {
     (async () => {
       if (!user) return;
+
+      // Sincronizar questionsCount con las preguntas reales en Firestore
+      try {
+        await questionsService.syncQuestionsCount(user.id);
+        // Refrescar el usuario para obtener estadísticas actualizadas desde Firestore
+        await refreshUser();
+      } catch (refreshError) {
+        console.warn("No se pudo sincronizar estadísticas en el perfil:", refreshError);
+      }
 
       const qs = await listMyQuestions();
       setMyQuestions(qs.map((q) => ({ id: q.id, title: q.title })));
@@ -121,6 +131,8 @@ export function ProfilePage() {
   function formatNotification(nType: string) {
     if (nType === "question/new-answer") return "Nueva respuesta en una de tus preguntas";
     if (nType === "answer/rated") return "Calificaron una de tus respuestas";
+    if (nType === "reputation/level-up") return "¡Subiste de nivel!";
+    if (nType === "reputation/rank-up") return "¡Subiste de rango!";
     return nType;
   }
 
@@ -132,12 +144,16 @@ export function ProfilePage() {
   }
 
   if (!user) {
-    return <div>Cargando...</div>;
+    return (
+      <div style={{ maxWidth: "800px", margin: "0 auto", padding: "20px", textAlign: "center" }}>
+        <p>Cargando...</p>
+      </div>
+    );
   }
 
   return (
-    <div style={{ maxWidth: "800px", margin: "0 auto", padding: "20px" }}>
-      <h1>Mi Perfil</h1>
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "20px" }}>
+      <h1 style={{ marginBottom: "30px", fontSize: "28px", fontWeight: "bold" }}>Mi Perfil</h1>
       
       {/* Tabs de navegación */}
       <div style={{ display: "flex", gap: "10px", marginBottom: "20px", borderBottom: "2px solid #ddd" }}>
@@ -197,26 +213,101 @@ export function ProfilePage() {
           </section>
 
           <section style={{ marginBottom: "30px", padding: "20px", background: "#f9f9f9", borderRadius: "8px" }}>
-            <h2>Estadísticas y Reputación</h2>
-            {reputation ? (
+            <h2 style={{ marginTop: 0, marginBottom: "20px" }}>Estadísticas y Reputación</h2>
+            {(() => {
+              // Usar datos de reputación si existen, sino usar datos del usuario con valores por defecto
+              const level = reputation?.level ?? user?.level ?? 1;
+              const xp = reputation?.xp ?? user?.xp ?? 0;
+              const rank = reputation?.rank ?? user?.rank ?? "Novato";
+              const trophiesCount = reputation?.trophiesCount ?? 0;
+              
+              return (
               <div>
-                <p><strong>Nivel:</strong> {reputation.level}</p>
-                <p><strong>Rango:</strong> {reputation.rank}</p>
-                <p><strong>XP Total:</strong> {reputation.xp}</p>
-                <p><strong>XP para siguiente nivel:</strong>{" "}
-                  {xpForNextLevel(reputation.level) - reputation.xp > 0
-                    ? xpForNextLevel(reputation.level) - reputation.xp
-                    : "¡Nivel máximo alcanzado!"}
-                </p>
-                <p><strong>Trofeos obtenidos:</strong> {reputation.trophiesCount}</p>
+                <div style={{ marginBottom: "24px", padding: "20px", background: "#fff", borderRadius: "8px", border: "1px solid #ddd" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }}>
+                    <div>
+                      <h3 style={{ margin: 0, fontSize: "24px", fontWeight: "bold", color: "#007bff" }}>Nivel {level}</h3>
+                      <p style={{ margin: "4px 0 0 0", fontSize: "16px", color: "#666", fontWeight: "500" }}>{rank}</p>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <p style={{ margin: 0, fontSize: "18px", fontWeight: "bold", color: "#28a745" }}>{xp} XP</p>
+                      <p style={{ margin: "4px 0 0 0", fontSize: "14px", color: "#666" }}>
+                        {xpNeededForNextLevel(level, xp)} XP para siguiente nivel
+                      </p>
+                    </div>
+                  </div>
+                  
+                  {/* Barra de XP estilo Fortnite */}
+                  <div style={{ marginTop: "16px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "14px", color: "#666" }}>
+                      <span>Progreso al nivel {level + 1}</span>
+                      <span>
+                        {(() => {
+                          const xpForCurrent = level > 1 ? xpRequiredForLevel(level) : 0;
+                          const xpForNext = xpRequiredForLevel(level + 1);
+                          const xpProgress = xp - xpForCurrent;
+                          const xpNeeded = xpForNext - xpForCurrent;
+                          return `${xpProgress} / ${xpNeeded}`;
+                        })()}
+                      </span>
+                    </div>
+                    <div style={{ 
+                      width: "100%", 
+                      height: "24px", 
+                      background: "#e9ecef", 
+                      borderRadius: "12px", 
+                      overflow: "hidden",
+                      position: "relative",
+                      boxShadow: "inset 0 2px 4px rgba(0,0,0,0.1)"
+                    }}>
+                      <div
+                        style={{
+                          height: "100%",
+                          width: `${Math.min(100, getLevelProgress(level, xp) * 100)}%`,
+                          background: "linear-gradient(90deg, #007bff 0%, #0056b3 50%, #007bff 100%)",
+                          borderRadius: "12px",
+                          transition: "width 0.5s ease-in-out",
+                          boxShadow: "0 2px 4px rgba(0,123,255,0.3)",
+                          position: "relative",
+                          overflow: "hidden"
+                        }}
+                      >
+                        <div style={{
+                          position: "absolute",
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          bottom: 0,
+                          background: "linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.3) 50%, transparent 100%)",
+                          animation: "shimmer 2s infinite"
+                        }} />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "16px", marginBottom: "20px" }}>
+                  <div style={{ padding: "16px", background: "#fff", borderRadius: "8px", border: "1px solid #ddd", textAlign: "center" }}>
+                    <p style={{ margin: 0, fontSize: "32px", fontWeight: "bold", color: "#007bff" }}>{trophiesCount}</p>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "14px", color: "#666" }}>🏆 Trofeos</p>
+                  </div>
+                  <div style={{ padding: "16px", background: "#fff", borderRadius: "8px", border: "1px solid #ddd", textAlign: "center" }}>
+                    <p style={{ margin: 0, fontSize: "32px", fontWeight: "bold", color: "#28a745" }}>{user?.questionsCount ?? myQuestions.length}</p>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "14px", color: "#666" }}>❓ Preguntas</p>
+                  </div>
+                  <div style={{ padding: "16px", background: "#fff", borderRadius: "8px", border: "1px solid #ddd", textAlign: "center" }}>
+                    <p style={{ margin: 0, fontSize: "32px", fontWeight: "bold", color: "#ffc107" }}>{user?.answersCount ?? myAnswers.length}</p>
+                    <p style={{ margin: "4px 0 0 0", fontSize: "14px", color: "#666" }}>💬 Respuestas</p>
+                  </div>
+                </div>
+                
+                <div style={{ padding: "16px", background: "#fff", borderRadius: "8px", border: "1px solid #ddd" }}>
+                  <p style={{ margin: "0 0 8px 0", fontSize: "14px", color: "#666" }}><strong>Preguntas guardadas:</strong> {savedQuestionIds.length}</p>
+                  <p style={{ margin: "0", fontSize: "14px", color: "#666" }}><strong>Preguntas seguidas:</strong> {followedQuestionIds.length}</p>
+                </div>
               </div>
-            ) : (
-              <p>No hay datos de reputación aún.</p>
-            )}
-            <p><strong>Preguntas realizadas:</strong> {myQuestions.length}</p>
-            <p><strong>Respuestas dadas:</strong> {myAnswers.length}</p>
-            <p><strong>Preguntas guardadas:</strong> {savedQuestionIds.length}</p>
-            <p><strong>Preguntas seguidas:</strong> {followedQuestionIds.length}</p>
+              );
+            })()}
           </section>
 
           <section style={{ marginBottom: "30px", padding: "20px", background: "#f9f9f9", borderRadius: "8px" }}>
@@ -250,7 +341,21 @@ export function ProfilePage() {
 
           <section style={{ marginBottom: "30px", padding: "20px", background: "#f9f9f9", borderRadius: "8px" }}>
             <h2>Notificaciones ({unreadCount} sin leer)</h2>
-            <button type="button" onClick={() => markAllRead()} style={{ marginBottom: "10px", padding: "8px 16px" }}>
+            <button
+              type="button"
+              onClick={() => markAllRead()}
+              style={{
+                marginBottom: "10px",
+                padding: "8px 16px",
+                background: "#007bff",
+                color: "white",
+                border: "none",
+                borderRadius: "6px",
+                cursor: "pointer",
+                fontSize: "14px",
+                fontWeight: "bold"
+              }}
+            >
               Marcar todas como leídas
             </button>
             {notifications.length === 0 ? (
@@ -304,8 +409,16 @@ export function ProfilePage() {
             <div style={{ marginBottom: "15px" }}>
               <p><strong>Email:</strong> {user.email} (no editable)</p>
             </div>
-            {error ? <p role="alert" style={{ color: "red", marginBottom: "10px" }}>{error}</p> : null}
-            {success ? <p role="alert" style={{ color: "green", marginBottom: "10px" }}>{success}</p> : null}
+            {error && (
+              <div role="alert" style={{ padding: "10px", marginBottom: "15px", background: "#f8d7da", color: "#721c24", border: "1px solid #f5c6cb", borderRadius: "4px" }}>
+                {error}
+              </div>
+            )}
+            {success && (
+              <div role="alert" style={{ padding: "10px", marginBottom: "15px", background: "#d4edda", color: "#155724", border: "1px solid #c3e6cb", borderRadius: "4px" }}>
+                {success}
+              </div>
+            )}
             <button
               type="submit"
               disabled={saving}
@@ -360,8 +473,16 @@ export function ProfilePage() {
                 required
               />
             </div>
-            {passwordError ? <p role="alert" style={{ color: "red", marginBottom: "10px" }}>{passwordError}</p> : null}
-            {passwordSuccess ? <p role="alert" style={{ color: "green", marginBottom: "10px" }}>{passwordSuccess}</p> : null}
+            {passwordError && (
+              <div role="alert" style={{ padding: "10px", marginBottom: "15px", background: "#f8d7da", color: "#721c24", border: "1px solid #f5c6cb", borderRadius: "4px" }}>
+                {passwordError}
+              </div>
+            )}
+            {passwordSuccess && (
+              <div role="alert" style={{ padding: "10px", marginBottom: "15px", background: "#d4edda", color: "#155724", border: "1px solid #c3e6cb", borderRadius: "4px" }}>
+                {passwordSuccess}
+              </div>
+            )}
             <button
               type="submit"
               disabled={changingPassword}

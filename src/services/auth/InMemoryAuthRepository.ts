@@ -101,6 +101,11 @@ export class InMemoryAuthRepository implements AuthRepository {
     me.updatedAt = nowIso();
   }
 
+  async refreshCurrentUser(): Promise<void> {
+    // En memoria, simplemente emitir el estado actual
+    this.emit();
+  }
+
   reset() {
     this.users = [];
     this.currentUserId = null;

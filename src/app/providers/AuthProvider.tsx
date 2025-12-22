@@ -11,6 +11,7 @@ type AuthContextValue = {
   register: (input: RegisterInput) => Promise<void>;
   updateProfile: (input: { name: string }) => Promise<void>;
   changePassword: (input: { currentPassword: string; newPassword: string }) => Promise<void>;
+  refreshUser: () => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -21,11 +22,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isReady, setIsReady] = useState(false);
 
   useEffect(() => {
+    let isMounted = true;
     const unsub = authService.onAuthStateChanged((u) => {
-      setUser(u);
-      setIsReady(true);
+      if (isMounted) {
+        setUser(u);
+        setIsReady(true);
+      }
     });
-    return unsub;
+    return () => {
+      isMounted = false;
+      unsub();
+    };
   }, []);
 
   const value = useMemo<AuthContextValue>(
@@ -45,6 +52,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       },
       changePassword: async (input) => {
         await authService.changePassword(input);
+      },
+      refreshUser: async () => {
+        await authService.refreshCurrentUser();
       },
       logout: async () => {
         await authService.logout();

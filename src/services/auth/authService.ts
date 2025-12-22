@@ -40,6 +40,10 @@ class AuthService {
   getUserById(id: string) {
     return this.repo.getUserById(id);
   }
+
+  refreshCurrentUser() {
+    return this.repo.refreshCurrentUser();
+  }
 }
 
 export const authService = new AuthService(new FirebaseAuthRepository());

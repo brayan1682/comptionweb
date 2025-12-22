@@ -27,6 +27,7 @@ export interface AuthRepository {
   updateProfile(input: { name: string }): Promise<User>;
   changePassword(input: ChangePasswordInput): Promise<void>;
   getUserById(id: string): User | null;
+  refreshCurrentUser(): Promise<void>;
   reset(): void;
 }
 

@@ -305,6 +305,12 @@ export class InMemoryQuestionsRepository implements QuestionsRepository {
     return items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   }
 
+  async syncQuestionsCount(userId: string): Promise<number> {
+    // En memoria, contar las preguntas del usuario
+    const count = this.questions.filter((q) => q.authorId === userId).length;
+    return count;
+  }
+
   async syncAuthorName(authorId: string, newName: string): Promise<void> {
     for (const q of this.questions) {
       if (q.authorId === authorId) q.authorName = newName;

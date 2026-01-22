@@ -13,9 +13,15 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
 };
 
+
 // Inicializar Firebase
 const app = initializeApp(firebaseConfig);
 
 // Inicializar servicios principales
 export const auth = getAuth(app);
 export const db = getFirestore(app);
+
+// Verificar configuración
+if (!db.app.options.projectId) {
+  console.warn("[Firebase] ⚠️ ProjectId no configurado. Verifica las variables de entorno.");
+}

@@ -1,4 +1,5 @@
 import type { Answer, Question, User } from "../../domain/types";
+import type { Reply } from "../../domain/reply";
 
 export type CreateQuestionInput = {
   title: string;
@@ -28,8 +29,20 @@ export interface QuestionsRepository {
   listAnswersByAuthorId(authorId: string): Promise<Array<{ questionId: string; answerId: string; content: string; createdAt: string }>>;
   syncAuthorName(authorId: string, newName: string): Promise<void>;
   syncQuestionsCount(userId: string): Promise<number>;
+  syncAnswersCount(userId: string): Promise<number>;
+  recalculateStats(userId: string): Promise<{ questionsCount: number; answersCount: number }>;
+  // ✅ DOMAIN FUNCTION: Delete question with all side effects (XP reversion, avgRating update, counters)
+  deleteQuestionWithSideEffects(questionId: string, adminUser: User): Promise<void>;
+  // ✅ DOMAIN FUNCTION: Delete answer with all side effects (XP reversion, avgRating update, counters)
+  deleteAnswerWithSideEffects(questionId: string, answerId: string, adminUser: User): Promise<void>;
+  
+  // Legacy aliases for backward compatibility (deprecated - use WithSideEffects versions)
   deleteQuestion(questionId: string, adminUser: User): Promise<void>;
   deleteAnswer(questionId: string, answerId: string, adminUser: User): Promise<void>;
+  // Replies (responder a respuestas)
+  addReply(input: { questionId: string; answerId: string; content: string }, author: User): Promise<Reply>;
+  listReplies(questionId: string, answerId: string): Promise<Reply[]>;
+  deleteReply(questionId: string, answerId: string, replyId: string, adminUser: User): Promise<void>;
   reset(): void;
 }
 

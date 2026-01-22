@@ -12,35 +12,149 @@ import {
   doc, 
   getDoc, 
   setDoc, 
-  updateDoc
+  updateDoc,
+  onSnapshot
 } from "firebase/firestore";
 import type { User } from "../../domain/types";
 import { ServiceError } from "../errors";
 import { isEmail, normalizeEmail, nowIso } from "../utils";
 import type { AuthRepository, AuthStateListener, ChangePasswordInput, LoginInput, RegisterInput } from "./AuthRepository";
 import { auth, db } from "../../firebase/firebase";
+import { publicProfilesService } from "../publicProfiles/publicProfilesService";
 
 export class FirebaseAuthRepository implements AuthRepository {
   private listeners = new Set<AuthStateListener>();
   private unsubscribeFirebase: (() => void) | null = null;
+  private unsubscribeFirestore: (() => void) | null = null;
   private currentUser: User | null = null;
   private isInitialized = false;
 
   constructor() {
     // Escuchar cambios de autenticación de Firebase
     this.unsubscribeFirebase = firebaseOnAuthStateChanged(auth, async (firebaseUser) => {
+      // Limpiar listener anterior de Firestore
+      if (this.unsubscribeFirestore) {
+        this.unsubscribeFirestore();
+        this.unsubscribeFirestore = null;
+      }
+
       if (firebaseUser) {
-        // Obtener datos del usuario desde Firestore
-        const user = await this.getUserFromFirestore(firebaseUser.uid);
-        this.currentUser = user;
-        this.isInitialized = true;
-        this.emit(user);
+        // ✅ FIX: Asegurar que users/{uid} exista en el primer login
+        try {
+          const userRef = doc(db, "users", firebaseUser.uid);
+          const userDoc = await getDoc(userRef);
+          
+          if (!userDoc.exists()) {
+            // Crear el documento del usuario si no existe
+            const now = nowIso();
+            const userData = {
+              uid: firebaseUser.uid,
+              name: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "Usuario",
+              displayName: firebaseUser.displayName || firebaseUser.email?.split("@")[0] || "Usuario",
+              email: firebaseUser.email || "",
+              role: "USER" as const,
+              level: 1,
+              xp: 0,
+              rank: "Novato",
+              questionsCount: 0,
+              answersCount: 0,
+              savedCount: 0,
+              followedCount: 0,
+              avgRating: 0,
+              createdAt: now,
+              updatedAt: now,
+            };
+            
+            await setDoc(userRef, userData, { merge: true });
+            console.log("[FirebaseAuthRepository] ✓ Usuario creado en onAuthStateChanged:", firebaseUser.uid);
+          }
+        } catch (error: any) {
+          console.warn("[FirebaseAuthRepository] No se pudo crear/verificar usuario en onAuthStateChanged:", error.message);
+          // Continuar de todas formas
+        }
+        
+        // ✅ REACTIVO: Usar onSnapshot sobre users/{userId} como única fuente de verdad
+        const userRef = doc(db, "users", firebaseUser.uid);
+        this.unsubscribeFirestore = onSnapshot(
+          userRef,
+          (snapshot) => {
+            if (!snapshot.exists()) {
+              console.warn(`[FirebaseAuthRepository] Usuario ${firebaseUser.uid} no existe en Firestore`);
+              this.currentUser = null;
+              this.isInitialized = true;
+              this.emit(null);
+              return;
+            }
+
+            const data = snapshot.data();
+            const now = nowIso();
+            
+            // Mapear datos de Firestore al tipo User
+            const user: User = {
+              id: firebaseUser.uid,
+              name: data.name || data.displayName || firebaseUser.displayName || "",
+              email: data.email || firebaseUser.email || "",
+              role: data.role || "USER",
+              level: data.level ?? 1,
+              xp: data.xp ?? 0,
+              rank: data.rank ?? "Novato",
+              questionsCount: data.questionsCount ?? 0,
+              answersCount: data.answersCount ?? 0,
+              savedCount: data.savedCount ?? 0,
+              followedCount: data.followedCount ?? 0,
+              avgRating: data.avgRating ?? 0,
+              createdAt: data.createdAt ? this.timestampToIso(data.createdAt) : now,
+              updatedAt: data.updatedAt ? this.timestampToIso(data.updatedAt) : now,
+            };
+
+            this.currentUser = user;
+            this.isInitialized = true;
+            this.emit(user);
+
+            // ✅ Sincronizar perfil público (no bloquea si falla)
+            try {
+              publicProfilesService.syncFromUser(firebaseUser.uid, {
+                displayName: user.name || firebaseUser.displayName || "Usuario",
+                photoURL: firebaseUser.photoURL || undefined,
+                level: user.level || 1,
+                rank: user.rank || "Novato",
+                xp: user.xp || 0,
+                questionsCount: user.questionsCount || 0,
+                answersCount: user.answersCount || 0,
+                avgRating: user.avgRating || 0,
+              }).catch((syncError: any) => {
+                console.warn(`[onSnapshot] No se pudo sincronizar perfil público (no bloquea): ${syncError.message || syncError.code || syncError}`);
+              });
+            } catch (syncError: any) {
+              console.warn(`[onSnapshot] Error sincronizando perfil público (no bloquea): ${syncError.message || syncError}`);
+            }
+          },
+          (error) => {
+            console.error(`[FirebaseAuthRepository] Error en onSnapshot de users/${firebaseUser.uid}:`, error);
+            // En caso de error, intentar cargar una vez con getDoc como fallback
+            this.getUserFromFirestore(firebaseUser.uid).then((user) => {
+              this.currentUser = user;
+              this.isInitialized = true;
+              this.emit(user);
+            }).catch(() => {
+              this.currentUser = null;
+              this.isInitialized = true;
+              this.emit(null);
+            });
+          }
+        );
       } else {
         this.currentUser = null;
         this.isInitialized = true;
         this.emit(null);
       }
     });
+  }
+
+  private timestampToIso(timestamp: any): string {
+    if (timestamp?.toDate) return timestamp.toDate().toISOString();
+    if (typeof timestamp === "string") return timestamp;
+    return new Date().toISOString();
   }
 
   private async getUserFromFirestore(uid: string): Promise<User | null> {
@@ -59,6 +173,8 @@ export class FirebaseAuthRepository implements AuthRepository {
         rank: "Novato",
         questionsCount: 0,
         answersCount: 0,
+        savedCount: 0,
+        followedCount: 0,
         avgRating: 0,
         createdAt: data.createdAt || now,
         updatedAt: data.updatedAt || now,
@@ -68,6 +184,8 @@ export class FirebaseAuthRepository implements AuthRepository {
       const needsUpdate = !data.level || !data.xp || !data.rank || 
                          data.questionsCount === undefined || 
                          data.answersCount === undefined ||
+                         data.savedCount === undefined ||
+                         data.followedCount === undefined ||
                          data.avgRating === undefined;
 
       if (needsUpdate) {
@@ -78,6 +196,8 @@ export class FirebaseAuthRepository implements AuthRepository {
             rank: data.rank ?? defaults.rank,
             questionsCount: data.questionsCount ?? defaults.questionsCount,
             answersCount: data.answersCount ?? defaults.answersCount,
+            savedCount: data.savedCount ?? defaults.savedCount,
+            followedCount: data.followedCount ?? defaults.followedCount,
             avgRating: data.avgRating ?? defaults.avgRating,
             updatedAt: now,
           });
@@ -96,9 +216,11 @@ export class FirebaseAuthRepository implements AuthRepository {
         rank: data.rank ?? defaults.rank,
         questionsCount: data.questionsCount ?? defaults.questionsCount,
         answersCount: data.answersCount ?? defaults.answersCount,
+        savedCount: data.savedCount ?? defaults.savedCount,
+        followedCount: data.followedCount ?? defaults.followedCount,
         avgRating: data.avgRating ?? defaults.avgRating,
-        createdAt: data.createdAt || defaults.createdAt,
-        updatedAt: data.updatedAt || defaults.updatedAt,
+        createdAt: data.createdAt ? this.timestampToIso(data.createdAt) : defaults.createdAt,
+        updatedAt: data.updatedAt ? this.timestampToIso(data.updatedAt) : defaults.updatedAt,
       };
     } catch (error) {
       console.error("Error obteniendo usuario de Firestore:", error);
@@ -163,12 +285,29 @@ export class FirebaseAuthRepository implements AuthRepository {
         rank: "Novato",
         questionsCount: 0,
         answersCount: 0,
+        savedCount: 0,
+        followedCount: 0,
         avgRating: 0,
         createdAt: now,
         updatedAt: now,
       };
 
       await setDoc(doc(db, "users", firebaseUser.uid), userData);
+
+      // Sincronizar perfil público (no bloquea si falla)
+      try {
+        await publicProfilesService.syncFromUser(firebaseUser.uid, {
+          displayName: name,
+          level: 1,
+          rank: "Novato",
+          xp: 0,
+          questionsCount: 0,
+          answersCount: 0,
+          avgRating: 0,
+        });
+      } catch (syncError: any) {
+        console.warn(`[register] No se pudo sincronizar perfil público (no bloquea): ${syncError.message || syncError}`);
+      }
 
       // Retornar el usuario creado
       const newUser: User = {
@@ -210,14 +349,58 @@ export class FirebaseAuthRepository implements AuthRepository {
       const userCredential = await signInWithEmailAndPassword(auth, email, password);
       const firebaseUser = userCredential.user;
 
-      // Obtener datos del usuario desde Firestore
-      const user = await this.getUserFromFirestore(firebaseUser.uid);
+      // ✅ FIX: Obtener datos del usuario desde Firestore, o crearlo si no existe
+      let user = await this.getUserFromFirestore(firebaseUser.uid);
       if (!user) {
-        throw new ServiceError("auth/invalid-credential", "Usuario no encontrado");
+        // Si no existe, crear el documento con valores por defecto
+        const now = nowIso();
+        const userData = {
+          uid: firebaseUser.uid,
+          displayName: firebaseUser.displayName || email.split("@")[0],
+          name: firebaseUser.displayName || email.split("@")[0],
+          email: firebaseUser.email || email,
+          role: "USER" as const,
+          level: 1,
+          xp: 0,
+          rank: "Novato",
+          questionsCount: 0,
+          answersCount: 0,
+          savedCount: 0,
+          followedCount: 0,
+          avgRating: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+        
+        await setDoc(doc(db, "users", firebaseUser.uid), userData, { merge: true });
+        
+        user = {
+          id: firebaseUser.uid,
+          ...userData,
+        };
       }
 
       this.currentUser = user;
       this.emit(user);
+
+      // ✅ Sincronizar perfil público (no bloquea si falla)
+      if (user) {
+        try {
+          await publicProfilesService.syncFromUser(firebaseUser.uid, {
+            displayName: user.name || firebaseUser.displayName || email.split("@")[0],
+            photoURL: firebaseUser.photoURL || undefined,
+            level: user.level || 1,
+            rank: user.rank || "Novato",
+            xp: user.xp || 0,
+            questionsCount: user.questionsCount || 0,
+            answersCount: user.answersCount || 0,
+            avgRating: user.avgRating || 0,
+          });
+        } catch (syncError: any) {
+          console.warn(`[login] No se pudo sincronizar perfil público (no bloquea): ${syncError.message || syncError.code || syncError}`);
+        }
+      }
+
       return user;
     } catch (error: any) {
       console.error("Error en login Firebase:", error);
@@ -265,6 +448,7 @@ export class FirebaseAuthRepository implements AuthRepository {
       const now = nowIso();
       await updateDoc(doc(db, "users", firebaseUser.uid), {
         name,
+        displayName: name,
         updatedAt: now,
       });
 
@@ -272,6 +456,21 @@ export class FirebaseAuthRepository implements AuthRepository {
       const user = await this.getUserFromFirestore(firebaseUser.uid);
       if (!user) {
         throw new ServiceError("auth/not-authenticated", "Usuario no encontrado");
+      }
+
+      // Sincronizar perfil público (no bloquea si falla)
+      try {
+        await publicProfilesService.syncFromUser(firebaseUser.uid, {
+          displayName: name,
+          level: user.level || 1,
+          rank: user.rank || "Novato",
+          xp: user.xp || 0,
+          questionsCount: user.questionsCount || 0,
+          answersCount: user.answersCount || 0,
+          avgRating: user.avgRating || 0,
+        });
+      } catch (syncError: any) {
+        console.warn(`[updateProfile] No se pudo sincronizar perfil público (no bloquea): ${syncError.message || syncError}`);
       }
 
       this.currentUser = user;
@@ -327,13 +526,9 @@ export class FirebaseAuthRepository implements AuthRepository {
   }
 
   async refreshCurrentUser(): Promise<void> {
-    // Refrescar el usuario actual desde Firestore
-    const firebaseUser = auth.currentUser;
-    if (firebaseUser) {
-      const user = await this.getUserFromFirestore(firebaseUser.uid);
-      this.currentUser = user;
-      this.emit(user);
-    }
+    // ✅ NO-OP: onSnapshot ya mantiene el estado actualizado automáticamente
+    // Este método se mantiene por compatibilidad pero no hace nada
+    // porque el listener de onSnapshot ya está activo
   }
 
   reset(): void {
@@ -343,6 +538,10 @@ export class FirebaseAuthRepository implements AuthRepository {
     if (this.unsubscribeFirebase) {
       this.unsubscribeFirebase();
       this.unsubscribeFirebase = null;
+    }
+    if (this.unsubscribeFirestore) {
+      this.unsubscribeFirestore();
+      this.unsubscribeFirestore = null;
     }
   }
 }

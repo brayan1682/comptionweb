@@ -7,7 +7,7 @@ export interface NotificationsRepository {
   create(notification: Notification): Promise<void>;
   markRead(userId: string, notificationId: string): Promise<void>;
   markAllRead(userId: string): Promise<void>;
-  onChanged(listener: NotificationsListener): () => void;
+  onChanged(listener: NotificationsListener, userId?: string): () => void;
   reset(): void;
 }
 

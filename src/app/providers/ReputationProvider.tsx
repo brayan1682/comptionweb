@@ -1,6 +1,5 @@
-import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import React, { createContext, useContext, useMemo } from "react";
 import type { UserReputation } from "../../domain/types";
-import { reputationService } from "../../services/reputation/reputationService";
 import { useAuth } from "./AuthProvider";
 
 type ReputationContextValue = {
@@ -13,32 +12,38 @@ const ReputationContext = createContext<ReputationContextValue | null>(null);
 
 export function ReputationProvider({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  const [reputation, setReputation] = useState<UserReputation | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      if (!user) {
-        setReputation(null);
-        return;
-      }
-      const rep = await reputationService.getByUserId(user.id);
-      setReputation(rep);
-    })();
-  }, [user?.id]);
+  // ✅ SINGLE SOURCE OF TRUTH: Derivar reputación directamente de users/{userId} del AuthProvider
+  // El AuthProvider ya mantiene onSnapshot reactivo sobre users/{userId}
+  const reputation: UserReputation | null = useMemo(() => {
+    if (!user) return null;
+
+    return {
+      userId: user.id,
+      xp: user.xp ?? 0,
+      level: user.level ?? 1,
+      rank: user.rank ?? "Novato",
+      trophiesCount: 0, // TODO: Agregar trophiesCount a users/{userId} si es necesario
+      createdAt: user.createdAt || new Date().toISOString(),
+      updatedAt: user.updatedAt || new Date().toISOString(),
+    };
+  }, [user]);
 
   const value = useMemo<ReputationContextValue>(
     () => ({
       reputation,
       refresh: async () => {
-        if (!user) {
-          setReputation(null);
-          return;
-        }
-        const rep = await reputationService.getByUserId(user.id);
-        setReputation(rep);
+        // ✅ NO-OP: El AuthProvider ya mantiene el estado actualizado automáticamente con onSnapshot
+        // Este método se mantiene por compatibilidad pero no hace nada
       },
       getByUserId: async (userId: string) => {
-        return reputationService.getByUserId(userId);
+        // ✅ Solo permitir leer reputación del usuario autenticado
+        if (!user || userId !== user.id) {
+          console.warn("[ReputationProvider] getByUserId: intentando leer reputación de otro usuario o sin auth");
+          return null;
+        }
+        // Retornar la reputación derivada del usuario actual
+        return reputation;
       }
     }),
     [reputation, user]

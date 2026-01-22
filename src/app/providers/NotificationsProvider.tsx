@@ -19,24 +19,44 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   async function refresh() {
+    // ✅ FIX: No ejecutar si no hay auth
     if (!user) {
       setNotifications([]);
       return;
     }
-    const list = await notificationsService.listForUser(user.id);
-    setNotifications(list);
+    
+    try {
+      const list = await notificationsService.listForUser(user.id);
+      setNotifications(list);
+    } catch (error: any) {
+      console.warn("[NotificationsProvider] Error refrescando notificaciones:", error.message);
+      // No romper la app, mantener array vacío
+      setNotifications([]);
+    }
   }
 
   useEffect(() => {
+    // ✅ FIX: Solo refrescar si hay user
+    if (!user) {
+      setNotifications([]);
+      return;
+    }
+    
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
 
   useEffect(() => {
-    // Preparado para “tiempo real”: hoy es un listener interno (mañana sería onSnapshot de Firestore)
+    // ✅ FIX: No montar listener si no hay auth
+    if (!user) {
+      return;
+    }
+    
+    // Escuchar cambios en tiempo real filtrando por usuario para evitar permission-denied
     const unsub = notificationsService.onChanged(() => {
       refresh();
-    });
+    }, user.id);
+    
     return unsub;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user?.id]);
@@ -49,13 +69,21 @@ export function NotificationsProvider({ children }: { children: React.ReactNode 
       refresh,
       markRead: async (notificationId: string) => {
         if (!user) return;
-        await notificationsService.markRead(user.id, notificationId);
-        await refresh();
+        try {
+          await notificationsService.markRead(user.id, notificationId);
+          await refresh();
+        } catch (error: any) {
+          console.warn("[NotificationsProvider] Error marcando notificación como leída:", error.message);
+        }
       },
       markAllRead: async () => {
         if (!user) return;
-        await notificationsService.markAllRead(user.id);
-        await refresh();
+        try {
+          await notificationsService.markAllRead(user.id);
+          await refresh();
+        } catch (error: any) {
+          console.warn("[NotificationsProvider] Error marcando todas como leídas:", error.message);
+        }
       },
       reset: () => {
         notificationsService.reset();
@@ -72,5 +100,3 @@ export function useNotifications() {
   if (!ctx) throw new Error("useNotifications debe usarse dentro de <NotificationsProvider />");
   return ctx;
 }
-
-

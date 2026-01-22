@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { useQuestions } from "../app/providers/QuestionsProvider";
+import { useAuth } from "../app/providers/AuthProvider";
 import type { Question } from "../domain/types";
 import { CATEGORIES } from "../services/categories/categoriesData";
 
@@ -16,14 +17,22 @@ export type ExploreFilter =
 
 export function ExplorePage() {
   const { questions, refresh } = useQuestions();
+  const { user } = useAuth();
   const [filter, setFilter] = useState<ExploreFilter>("most-viewed");
   const [category, setCategory] = useState<string>("all");
   const [filteredQuestions, setFilteredQuestions] = useState<Question[]>([]);
 
   useEffect(() => {
-    refresh();
+    // Refrescar siempre desde Firestore al cargar la página
+    // Esto asegura que no haya datos stale
+    if (user) {
+      console.log("[ExplorePage] Usuario autenticado, refrescando questions desde Firestore");
+      refresh().catch(error => {
+        console.error("[ExplorePage] Error refrescando questions:", error);
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user?.id]); // Refrescar cuando cambia el usuario
 
   useEffect(() => {
     let filtered = [...questions];

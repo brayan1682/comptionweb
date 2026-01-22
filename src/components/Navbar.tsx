@@ -37,22 +37,23 @@ export function Navbar() {
   }, [showNotifications]);
 
   function getNotificationText(notification: Notification): string {
+    const data: any = notification.data && typeof notification.data === "object" ? notification.data : {};
     switch (notification.type) {
       case "question/new-answer":
         return "Nueva respuesta en tu pregunta";
       case "answer/rated":
-        if ("rating" in notification.data) {
-          return `Tu respuesta fue calificada con ${notification.data.rating} estrellas`;
+        if ("rating" in data) {
+          return `Tu respuesta fue calificada con ${data.rating} estrellas`;
         }
         return "Tu respuesta fue calificada";
       case "reputation/level-up":
-        if ("level" in notification.data) {
-          return `¡Subiste al nivel ${notification.data.level}!`;
+        if ("level" in data) {
+          return `¡Subiste al nivel ${data.level}!`;
         }
         return "Subiste de nivel";
       case "reputation/rank-up":
-        if ("rank" in notification.data) {
-          return `¡Alcanzaste el rango ${notification.data.rank}!`;
+        if ("rank" in data) {
+          return `¡Alcanzaste el rango ${data.rank}!`;
         }
         return "Subiste de rango";
       default:
@@ -61,11 +62,12 @@ export function Navbar() {
   }
 
   function getNotificationLink(notification: Notification): string {
+    const data: any = notification.data && typeof notification.data === "object" ? notification.data : {};
     if (notification.type === "question/new-answer" || notification.type === "answer/rated") {
-      if ("questionId" in notification.data) {
-        const questionId = notification.data.questionId;
-        if ("answerId" in notification.data) {
-          return `/question/${questionId}#answer-${notification.data.answerId}`;
+      if ("questionId" in data) {
+        const questionId = data.questionId;
+        if ("answerId" in data) {
+          return `/question/${questionId}#answer-${data.answerId}`;
         }
         return `/question/${questionId}`;
       }

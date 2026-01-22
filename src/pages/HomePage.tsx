@@ -1,14 +1,23 @@
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useQuestions } from "../app/providers/QuestionsProvider";
+import { useAuth } from "../app/providers/AuthProvider";
 
 export function HomePage() {
   const { questions, refresh } = useQuestions();
+  const { user } = useAuth();
 
   useEffect(() => {
-    refresh();
+    // Refrescar siempre desde Firestore al cargar la página
+    // Esto asegura que no haya datos stale
+    if (user) {
+      console.log("[HomePage] Usuario autenticado, refrescando questions desde Firestore");
+      refresh().catch(error => {
+        console.error("[HomePage] Error refrescando questions:", error);
+      });
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [user?.id]); // Refrescar cuando cambia el usuario
 
   const sorted = [...questions].sort((a, b) => {
     if (a.viewsCount !== b.viewsCount) return b.viewsCount - a.viewsCount;
@@ -66,6 +75,11 @@ export function HomePage() {
               >
                 <Link
                   to={`/question/${q.id}`}
+                  onClick={() => {
+                    console.log("[HomePage] Click en pregunta:");
+                    console.log("[HomePage] q.id:", JSON.stringify(q.id));
+                    console.log("[HomePage] URL:", `/question/${q.id}`);
+                  }}
                   style={{
                     fontSize: "18px",
                     fontWeight: "bold",

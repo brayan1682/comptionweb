@@ -1,52 +1,44 @@
-import { collection, doc, getDoc, setDoc } from "firebase/firestore";
+import { collection, getDocs } from "firebase/firestore";
 import { db } from "./firebase";
-import { CATEGORIES, PREDEFINED_TAGS } from "../services/categories/categoriesData";
 
 /**
  * Inicializa las colecciones de categorías y tags en Firestore
- * Este script debe ejecutarse una vez para poblar las colecciones iniciales
+ * ✅ FIX: Solo LEE categorías/tags (no intenta crearlas desde cliente)
+ * Si no existen o hay permission-denied, usa defaults locales en memoria
+ * ✅ No reintenta infinitamente - solo intenta una vez por colección
  */
 export async function initializeFirestore() {
+  // ✅ FIX: Solo verificar que existan, NO intentar crearlas desde cliente
+  // Las reglas prohíben write en categories/tags desde cliente
+  const categoriesRef = collection(db, "categories");
+  const tagsRef = collection(db, "tags");
+  
+  // Intentar leer algunas categorías/tags para verificar conectividad
+  // ✅ No reintenta - si falla, usa defaults locales
   try {
-    // Inicializar categorías
-    const categoriesRef = collection(db, "categories");
-    for (const category of CATEGORIES) {
-      const categoryDoc = doc(categoriesRef, category);
-      const categorySnap = await getDoc(categoryDoc);
-      
-      if (!categorySnap.exists()) {
-        await setDoc(categoryDoc, {
-          id: category,
-          name: category,
-          createdAt: new Date().toISOString(),
-        });
-        console.log(`Categoría creada: ${category}`);
-      }
-    }
-
-    // Inicializar tags
-    const tagsRef = collection(db, "tags");
-    for (const tag of PREDEFINED_TAGS) {
-      const tagDoc = doc(tagsRef, tag);
-      const tagSnap = await getDoc(tagDoc);
-      
-      if (!tagSnap.exists()) {
-        await setDoc(tagDoc, {
-          id: tag,
-          name: tag,
-          createdAt: new Date().toISOString(),
-        });
-        console.log(`Tag creado: ${tag}`);
-      }
-    }
-
-    console.log("Firestore inicializado correctamente");
-  } catch (error) {
-    console.error("Error inicializando Firestore:", error);
-    throw error;
+    const categoriesSnapshot = await getDocs(categoriesRef);
+    console.log(`[initFirestore] ✓ Categorías encontradas en Firestore: ${categoriesSnapshot.size}`);
+  } catch (error: any) {
+    const errorCode = error?.code || "unknown";
+    const errorMessage = error?.message || String(error);
+    const path = "categories";
+    console.warn(`[initFirestore] ⚠️ No se pudieron leer categorías (path: ${path}): ${errorCode} - ${errorMessage}`);
+    console.warn(`[initFirestore] → Usando defaults locales para categorías`);
+    // ✅ No lanzar error - la app puede funcionar con defaults locales
   }
+
+  try {
+    const tagsSnapshot = await getDocs(tagsRef);
+    console.log(`[initFirestore] ✓ Tags encontrados en Firestore: ${tagsSnapshot.size}`);
+  } catch (error: any) {
+    const errorCode = error?.code || "unknown";
+    const errorMessage = error?.message || String(error);
+    const path = "tags";
+    console.warn(`[initFirestore] ⚠️ No se pudieron leer tags (path: ${path}): ${errorCode} - ${errorMessage}`);
+    console.warn(`[initFirestore] → Usando defaults locales para tags`);
+    // ✅ No lanzar error - la app puede funcionar con defaults locales
+  }
+
+  console.log("[initFirestore] ✓ Inicialización completada (usando defaults locales si no existen en Firestore)");
+  // ✅ No hay try/catch externo - cada operación maneja su propio error
 }
-
-
-
-

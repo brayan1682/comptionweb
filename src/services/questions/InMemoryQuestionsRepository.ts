@@ -311,6 +311,26 @@ export class InMemoryQuestionsRepository implements QuestionsRepository {
     return count;
   }
 
+  async syncAnswersCount(_userId: string): Promise<number> {
+    throw new Error("Not implemented");
+  }
+
+  async recalculateStats(_userId: string): Promise<{ questionsCount: number; answersCount: number }> {
+    throw new Error("Not implemented");
+  }
+
+  async addReply(_input: { questionId: string; answerId: string; content: string }, _author: User): Promise<import("../../domain/reply").Reply> {
+    throw new Error("Not implemented");
+  }
+
+  async listReplies(_questionId: string, _answerId: string): Promise<import("../../domain/reply").Reply[]> {
+    throw new Error("Not implemented");
+  }
+
+  async deleteReply(_questionId: string, _answerId: string, _replyId: string, _adminUser: User): Promise<void> {
+    throw new Error("Not implemented");
+  }
+
   async syncAuthorName(authorId: string, newName: string): Promise<void> {
     for (const q of this.questions) {
       if (q.authorId === authorId) q.authorName = newName;
@@ -320,7 +340,8 @@ export class InMemoryQuestionsRepository implements QuestionsRepository {
     }
   }
 
-  async deleteQuestion(questionId: string, adminUser: User): Promise<void> {
+  // ✅ DOMAIN FUNCTION: Delete question with all side effects
+  async deleteQuestionWithSideEffects(questionId: string, adminUser: User): Promise<void> {
     if (adminUser.role !== "ADMIN") {
       throw new ServiceError("validation/invalid-argument", "Solo administradores pueden eliminar preguntas");
     }
@@ -329,7 +350,8 @@ export class InMemoryQuestionsRepository implements QuestionsRepository {
     this.questions.splice(index, 1);
   }
 
-  async deleteAnswer(questionId: string, answerId: string, adminUser: User): Promise<void> {
+  // ✅ DOMAIN FUNCTION: Delete answer with all side effects
+  async deleteAnswerWithSideEffects(questionId: string, answerId: string, adminUser: User): Promise<void> {
     if (adminUser.role !== "ADMIN") {
       throw new ServiceError("validation/invalid-argument", "Solo administradores pueden eliminar respuestas");
     }
@@ -338,6 +360,15 @@ export class InMemoryQuestionsRepository implements QuestionsRepository {
     const index = q.answers.findIndex((a) => a.id === answerId);
     if (index === -1) throw new ServiceError("questions/not-found", "Respuesta no encontrada");
     q.answers.splice(index, 1);
+  }
+
+  // Legacy aliases for backward compatibility
+  async deleteQuestion(questionId: string, adminUser: User): Promise<void> {
+    return this.deleteQuestionWithSideEffects(questionId, adminUser);
+  }
+
+  async deleteAnswer(questionId: string, answerId: string, adminUser: User): Promise<void> {
+    return this.deleteAnswerWithSideEffects(questionId, answerId, adminUser);
   }
 
   reset() {

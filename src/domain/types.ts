@@ -10,6 +10,8 @@ export type User = {
   rank: string; // Rango actual (inicia en "Novato")
   questionsCount: number; // Contador de preguntas creadas
   answersCount: number; // Contador de respuestas dadas
+  savedCount: number; // Contador de preguntas guardadas
+  followedCount: number; // Contador de preguntas seguidas
   avgRating: number; // Calificación promedio
   createdAt: string; // ISO (Firestore Timestamp -> string en demo)
   updatedAt: string; // ISO

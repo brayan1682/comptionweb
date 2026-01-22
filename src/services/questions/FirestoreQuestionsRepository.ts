@@ -1,5 +1,6 @@
 import {
   collection,
+  collectionGroup,
   doc,
   getDoc,
   getDocs,
@@ -9,780 +10,2146 @@ import {
   deleteDoc,
   where,
   orderBy,
-  Timestamp,
   writeBatch,
-  increment
+  increment,
+  runTransaction,
+  serverTimestamp,
 } from "firebase/firestore";
+
 import type { Answer, Question, User } from "../../domain/types";
+import type { Reply } from "../../domain/reply";
 import { ServiceError } from "../errors";
 import { nowIso } from "../utils";
 import type { AddAnswerInput, CreateQuestionInput, QuestionsRepository } from "./QuestionsRepository";
 import { notificationsService } from "../notifications/notificationsService";
-import { answerRatedNotification, newAnswerNotification } from "../notifications/factories";
-import { reputationService } from "../reputation/reputationService";
-import { XP_VALUES } from "../reputation/reputationUtils";
+import { answerRatedNotification, newAnswerNotification, questionRatedNotification } from "../notifications/factories";
 import { CATEGORIES, PREDEFINED_TAGS } from "../categories/categoriesData";
 import { userDataService } from "../userData/userDataService";
-import { db } from "../../firebase/firebase";
+import { db, auth } from "../../firebase/firebase";
+import { FIRESTORE_PATHS } from "./paths";
+import { getXpByStars, calculateLevel, calculateRank } from "../reputation/reputationUtils";
+import { syncXpChangeWithSnapshots } from "../reputation/xpSyncUtils";
 
-// Constantes para el sistema de trofeos
-const MIN_VOTES_FOR_TROPHY = 3;
+function requireDb() {
+  if (!db) throw new Error("Firebase db no está inicializado");
+  const projectId = db.app.options.projectId;
+  if (!projectId) throw new Error("Firebase projectId no está configurado");
+}
+
+function requireAuthUid(): string {
+  const uid = auth.currentUser?.uid;
+  if (!uid) throw new ServiceError("auth/not-authenticated", "No estás autenticado");
+  return uid;
+}
+
+function isValidStars(value: unknown): value is number {
+  return Number.isInteger(value) && (value as number) >= 1 && (value as number) <= 5;
+}
+
+function safeErr(e: any): string {
+  return e?.message || e?.code || String(e);
+}
 
 export class FirestoreQuestionsRepository implements QuestionsRepository {
-  // Convertir Firestore Timestamp a ISO string
   private timestampToIso(timestamp: any): string {
-    if (timestamp?.toDate) {
-      return timestamp.toDate().toISOString();
-    }
-    if (typeof timestamp === "string") {
-      return timestamp;
-    }
+    if (timestamp?.toDate) return timestamp.toDate().toISOString();
+    if (typeof timestamp === "string") return timestamp;
     return new Date().toISOString();
   }
 
-  // Convertir ISO string a Firestore Timestamp
-  private isoToTimestamp(iso: string): Timestamp {
-    return Timestamp.fromDate(new Date(iso));
+  private computeRatingStats(ratingsByUserId: Record<string, number>) {
+    const all = Object.values(ratingsByUserId);
+    const ratingCount = all.length;
+    const ratingAvg =
+      ratingCount > 0 ? Math.round((all.reduce((s, v) => s + v, 0) / ratingCount) * 10) / 10 : 0;
+    return { ratingAvg, ratingCount };
   }
 
-  // Convertir documento de pregunta de Firestore a Question
-  private async firestoreQuestionToQuestion(questionDoc: any): Promise<Question> {
-    const data = questionDoc.data();
-    const questionId = questionDoc.id;
 
-    // Obtener respuestas de la subcolección
-    const answersSnapshot = await getDocs(collection(db, "questions", questionId, "answers"));
+  private async loadAnswersForQuestion(questionId: string): Promise<Answer[]> {
+    requireDb();
+
     const answers: Answer[] = [];
+    const answersRef = collection(db, FIRESTORE_PATHS.answers(questionId));
 
-    for (const answerDoc of answersSnapshot.docs) {
-      const answerData = answerDoc.data();
+    let snap;
+    try {
+      snap = await getDocs(query(answersRef, orderBy("createdAt", "desc")));
+    } catch (e: any) {
+      console.warn(`[loadAnswersForQuestion] orderBy fallback: ${safeErr(e)}`);
+      snap = await getDocs(answersRef);
+    }
+
+    for (const answerDoc of snap.docs) {
+      const a = answerDoc.data();
+      const answerId = answerDoc.id;
+
+      // ✅ Usar ratingAvg y ratingCount directamente del documento (actualizados por Cloud Functions o cliente)
+      const ratingAvg = Number(a.ratingAvg || 0);
+      const ratingCount = Number(a.ratingCount || 0);
+      
+      // ✅ ISSUE 1 FIX: Cargar rating del usuario actual desde Firestore para detectar si ya calificó
+      const ratingsByUserId: Record<string, number> = {};
+      const currentUserId = auth.currentUser?.uid;
+      if (currentUserId) {
+        try {
+          const ratingRef = doc(db, "questions", questionId, "answers", answerId, "ratings", currentUserId);
+          const ratingSnap = await getDoc(ratingRef);
+          if (ratingSnap.exists()) {
+            const ratingData = ratingSnap.data();
+            const ratingValue = Number(ratingData?.value || ratingData?.stars || 0);
+            if (isValidStars(ratingValue)) {
+              ratingsByUserId[currentUserId] = ratingValue;
+              console.log(`[loadAnswersForQuestion] Rating UI disabled for user: questions/${questionId}/answers/${answerId}/ratings/${currentUserId} = ${ratingValue} stars`);
+            }
+          }
+        } catch (e: any) {
+          // Best-effort: si falla la lectura del rating, continuar sin bloquear
+          console.warn(`[loadAnswersForQuestion] No se pudo leer rating del usuario actual para respuesta ${answerId} (best-effort): ${safeErr(e)}`);
+        }
+      }
+
       answers.push({
-        id: answerDoc.id,
+        id: answerId,
         questionId,
-        content: answerData.content,
-        authorId: answerData.authorId,
-        authorName: answerData.authorName,
-        isAnonymous: answerData.isAnonymous || false,
-        createdAt: this.timestampToIso(answerData.createdAt),
-        updatedAt: this.timestampToIso(answerData.updatedAt),
-        ratingsByUserId: answerData.ratingsByUserId || {},
-        ratingAvg: answerData.ratingAvg || 0,
-        ratingCount: answerData.ratingCount || 0,
+        content: a.content || "",
+        authorId: a.authorId || "",
+        authorName: a.authorName || "",
+        isAnonymous: Boolean(a.isAnonymous),
+        createdAt: this.timestampToIso(a.createdAt),
+        updatedAt: this.timestampToIso(a.updatedAt),
+        ratingsByUserId,
+        ratingAvg,
+        ratingCount,
       });
     }
 
-    // Ordenar respuestas por fecha (más nuevas primero)
-    answers.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    answers.sort((x, y) => (x.createdAt < y.createdAt ? 1 : -1));
+    return answers;
+  }
 
-    // Asegurar que todos los campos obligatorios existan (compatibilidad con preguntas antiguas)
+  private async firestoreQuestionToQuestion(questionDoc: any): Promise<Question> {
+    requireDb();
+
+    const questionId = questionDoc.id;
+    const data = questionDoc.data();
+    if (!questionId || !data) throw new Error("Documento inválido");
+
+    const answers = await this.loadAnswersForQuestion(questionId);
+    
+    // ✅ Usar ratingAvg y ratingCount directamente del documento (actualizados por Cloud Functions o cliente)
+    // Ya no leemos ratings raw para evitar permission-denied y mejorar rendimiento
+    const ratingAvg = Number(data.ratingAvg || 0);
+    const ratingCount = Number(data.ratingCount || 0);
+    
+    // ✅ PROBLEMA 1 FIX: Cargar rating del usuario actual desde Firestore para detectar si ya calificó
+    const ratingsByUserId: Record<string, number> = {};
+    const currentUserId = auth.currentUser?.uid;
+    if (currentUserId) {
+      try {
+        const ratingRef = doc(db, "questions", questionId, "ratings", currentUserId);
+        const ratingSnap = await getDoc(ratingRef);
+        if (ratingSnap.exists()) {
+          const ratingData = ratingSnap.data();
+          const ratingValue = Number(ratingData?.value || ratingData?.stars || 0);
+          if (isValidStars(ratingValue)) {
+            ratingsByUserId[currentUserId] = ratingValue;
+            console.log(`[firestoreQuestionToQuestion] Rating UI disabled for user: questions/${questionId}/ratings/${currentUserId} = ${ratingValue} stars`);
+          }
+        }
+      } catch (e: any) {
+        // Best-effort: si falla la lectura del rating, continuar sin bloquear
+        console.warn(`[firestoreQuestionToQuestion] No se pudo leer rating del usuario actual (best-effort): ${safeErr(e)}`);
+      }
+    }
+
     const now = nowIso();
+
     return {
       id: questionId,
       title: data.title || "Sin título",
       description: data.description || "",
       authorId: data.authorId || "",
       authorName: data.authorName || "Usuario desconocido",
-      isAnonymous: data.isAnonymous || false,
+      isAnonymous: Boolean(data.isAnonymous),
       category: data.category || "General",
-      tags: data.tags || [],
+      tags: Array.isArray(data.tags) ? data.tags : [],
       createdAt: data.createdAt ? this.timestampToIso(data.createdAt) : now,
       updatedAt: data.updatedAt ? this.timestampToIso(data.updatedAt) : now,
       answers,
       viewedByUserId: data.viewedByUserId || {},
-      viewsCount: data.viewsCount || 0,
-      ratingsByUserId: data.ratingsByUserId || {},
-      ratingAvg: data.ratingAvg || 0,
-      ratingCount: data.ratingCount || 0,
-      trophyAnswerId: data.trophyAnswerId || null,
+      viewsCount: Number(data.viewsCount || 0),
+      ratingsByUserId,
+      ratingAvg,
+      ratingCount,
+      // ✅ La copa la asigna Cloud Functions (server-side)
+      trophyAnswerId: data.trophyAnswerId || data.bestAnswerId || null,
     };
-  }
-
-  // Calcular y asignar trofeo a la mejor respuesta de una pregunta
-  private async updateTrophyForQuestion(question: Question): Promise<void> {
-    if (question.answers.length === 0) {
-      await updateDoc(doc(db, "questions", question.id), {
-        trophyAnswerId: null,
-      });
-      return;
-    }
-
-    const eligibleAnswers = question.answers.filter((a) => a.ratingCount >= MIN_VOTES_FOR_TROPHY);
-
-    if (eligibleAnswers.length === 0) {
-      await updateDoc(doc(db, "questions", question.id), {
-        trophyAnswerId: null,
-      });
-      return;
-    }
-
-    const bestAnswer = eligibleAnswers.reduce((best, current) => {
-      if (current.ratingAvg > best.ratingAvg) return current;
-      if (current.ratingAvg < best.ratingAvg) return best;
-      if (current.ratingCount > best.ratingCount) return current;
-      if (current.ratingCount < best.ratingCount) return best;
-      return current.createdAt > best.createdAt ? current : best;
-    });
-
-    const questionRef = doc(db, "questions", question.id);
-    const questionDoc = await getDoc(questionRef);
-    const previousTrophyId = questionDoc.data()?.trophyAnswerId || null;
-
-    await updateDoc(questionRef, {
-      trophyAnswerId: bestAnswer.id,
-    });
-
-    if (previousTrophyId !== bestAnswer.id) {
-      await reputationService.addXp(bestAnswer.authorId, XP_VALUES.TROPHY_OBTAINED);
-      const rep = await reputationService.getByUserId(bestAnswer.authorId);
-      if (rep) {
-        await reputationService.setTrophiesCount(bestAnswer.authorId, rep.trophiesCount + 1);
-      } else {
-        await reputationService.setTrophiesCount(bestAnswer.authorId, 1);
-      }
-    }
   }
 
   async listQuestions(): Promise<Question[]> {
-    const questionsRef = collection(db, "questions");
-    const q = query(questionsRef, orderBy("createdAt", "desc"));
-    const snapshot = await getDocs(q);
-    
-    const questions: Question[] = [];
-    for (const questionDoc of snapshot.docs) {
-      const question = await this.firestoreQuestionToQuestion(questionDoc);
-      questions.push(question);
+    requireDb();
+
+    const questionsRef = collection(db, FIRESTORE_PATHS.QUESTIONS);
+
+    let snap;
+    try {
+      snap = await getDocs(query(questionsRef, orderBy("createdAt", "desc")));
+    } catch (e: any) {
+      console.warn(`[listQuestions] orderBy fallback: ${safeErr(e)}`);
+      snap = await getDocs(questionsRef);
     }
-    
-    return questions;
+
+    const out: Question[] = [];
+    for (const d of snap.docs) {
+      try {
+        out.push(await this.firestoreQuestionToQuestion(d));
+      } catch (e: any) {
+        console.error(`[listQuestions] error doc=${d.id}: ${safeErr(e)}`);
+      }
+    }
+
+    out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return out;
   }
 
   async getQuestionById(id: string): Promise<Question | null> {
-    // Normalizar el id: eliminar espacios y asegurar que sea string
-    const normalizedId = id ? String(id).trim() : "";
-    
-    if (!normalizedId) {
-      console.warn("[FirestoreQuestionsRepository] getQuestionById: ID vacío o inválido");
-      return null;
+    requireDb();
+
+    const qid = (id || "").trim();
+    if (!qid) {
+      console.warn(`[getQuestionById] ID inválido: "${id}"`);
+      throw new ServiceError("validation/invalid-argument", "ID de pregunta inválido");
     }
 
-    console.log("[FirestoreQuestionsRepository] getQuestionById: Buscando pregunta con ID:", normalizedId, "(tipo:", typeof normalizedId, ", longitud:", normalizedId.length, ")");
+    const questionRef = doc(db, FIRESTORE_PATHS.QUESTIONS, qid);
 
-    // Usar estrictamente doc(db, "questions", questionId) - NO usar where ni otras consultas
-    const questionRef = doc(db, "questions", normalizedId);
-    let questionDoc = await getDoc(questionRef);
-    
-    // Si no existe, esperar un poco y reintentar (para casos de propagación de Firestore)
-    // Esto es especialmente importante justo después de crear una pregunta
-    if (!questionDoc.exists()) {
-      // Reintentar hasta 5 veces con esperas progresivas
-      let attempts = 0;
-      const maxAttempts = 5;
-      while (!questionDoc.exists() && attempts < maxAttempts) {
-        await new Promise(resolve => setTimeout(resolve, 200 * (attempts + 1))); // Esperas progresivas: 200ms, 400ms, 600ms, 800ms, 1000ms
-        questionDoc = await getDoc(questionRef);
-        attempts++;
+    const maxRetries = 3;
+    const delays = [100, 300, 500];
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const snap = await getDoc(questionRef);
+
+        if (snap.exists()) {
+          console.log(`[getQuestionById] ✓ Pregunta encontrada: ${qid} (intento ${attempt + 1})`);
+          return this.firestoreQuestionToQuestion(snap);
+        }
+
+        // ✅ Doc no existe (snap.exists() == false)
+        // No es un error de permisos, simplemente no existe
+        if (attempt < maxRetries) {
+          const delay = delays[attempt] || 500;
+          console.log(`[getQuestionById] ⏳ Pregunta no encontrada en intento ${attempt + 1}, reintentando en ${delay}ms...`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+
+        console.warn(`[getQuestionById] ❌ Pregunta no encontrada después de ${maxRetries + 1} intentos: ${qid}`);
+        return null; // ✅ Retornar null cuando el doc no existe (no lanzar error)
+      } catch (e: any) {
+        const errorCode = e?.code || "unknown";
+        const errorMessage = safeErr(e);
+
+        // ✅ Diferenciar permission-denied: NO es "no encontrada", es error de permisos
+        if (errorCode === "permission-denied") {
+          console.error(`[getQuestionById] ❌ PERMISSION-DENIED: ${qid} - ${errorMessage}`);
+          // Lanzar error específico para que el frontend lo maneje correctamente
+          throw new ServiceError("permission-denied", `No tienes permisos para ver esta pregunta: ${errorMessage}`);
+        }
+
+        if (errorCode === "failed-precondition") {
+          console.warn(`[getQuestionById] ⚠️ failed-precondition (índice faltante), reintentando...`);
+          if (attempt < maxRetries) {
+            const delay = delays[attempt] || 500;
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
+          }
+        }
+
+        if (attempt === maxRetries) {
+          console.error(`[getQuestionById] ❌ Error después de ${maxRetries + 1} intentos: ${errorCode} - ${errorMessage}`);
+          throw new ServiceError("questions/read-failed", `Error al leer la pregunta: ${errorMessage}`);
+        }
       }
     }
 
-    // Solo retornar null si Firestore respondió y el documento realmente no existe
-    if (!questionDoc.exists()) {
-      console.warn(`[FirestoreQuestionsRepository] getQuestionById: Pregunta con ID "${normalizedId}" no encontrada en Firestore (doc.exists() === false) después de ${attempts} intentos`);
-      return null;
-    }
-    
-    const question = await this.firestoreQuestionToQuestion(questionDoc);
-    console.log("[FirestoreQuestionsRepository] getQuestionById: Pregunta encontrada con ID:", question.id, "(tipo:", typeof question.id, ", longitud:", question.id.length, ")");
-    return question;
+    return null;
   }
 
   async createQuestion(input: CreateQuestionInput, author: User): Promise<Question> {
+    requireDb();
+    const uid = requireAuthUid();
+
     const title = input.title.trim();
     const description = input.description.trim();
-    
-    if (title.length < 8) {
-      throw new ServiceError("validation/invalid-argument", "El título debe tener al menos 8 caracteres");
-    }
-    if (description.length < 10) {
-      throw new ServiceError("validation/invalid-argument", "La descripción debe tener al menos 10 caracteres");
-    }
 
-    if (!CATEGORIES.includes(input.category as any)) {
-      throw new ServiceError("validation/invalid-argument", "Categoría inválida");
-    }
+    if (title.length < 8) throw new ServiceError("validation/invalid-argument", "El título debe tener al menos 8 caracteres");
+    if (description.length < 10)
+      throw new ServiceError("validation/invalid-argument", "La descripción debe tener al menos 10 caracteres");
+    if (!CATEGORIES.includes(input.category as any)) throw new ServiceError("validation/invalid-argument", "Categoría inválida");
 
     const tags = input.tags || [];
-    if (tags.length < 1 || tags.length > 5) {
+    if (tags.length < 1 || tags.length > 5)
       throw new ServiceError("validation/invalid-argument", "Debes seleccionar entre 1 y 5 etiquetas");
-    }
-    const invalidTags = tags.filter((tag) => !PREDEFINED_TAGS.includes(tag as any));
-    if (invalidTags.length > 0) {
-      throw new ServiceError("validation/invalid-argument", `Etiquetas inválidas: ${invalidTags.join(", ")}`);
-    }
+    const invalidTags = tags.filter((t) => !PREDEFINED_TAGS.includes(t as any));
+    if (invalidTags.length) throw new ServiceError("validation/invalid-argument", `Etiquetas inválidas: ${invalidTags.join(", ")}`);
 
-    const now = nowIso();
-    const questionRef = doc(collection(db, "questions"));
+    let authorName = (author?.name || "").trim() || "Usuario";
+    try {
+      const u = await getDoc(doc(db, "users", uid));
+      if (u.exists()) {
+        const ud = u.data();
+        authorName = (ud?.name || ud?.displayName || authorName).trim() || authorName;
+      }
+    } catch {}
+
+    const questionRef = doc(collection(db, FIRESTORE_PATHS.QUESTIONS));
+
     const questionData = {
       title,
       description,
-      authorId: author.id,
-      authorName: author.name,
+      authorId: uid,
+      authorName,
       isAnonymous: Boolean(input.isAnonymous),
       category: input.category,
       tags: [...tags],
-      createdAt: this.isoToTimestamp(now),
-      updatedAt: this.isoToTimestamp(now),
-      viewedByUserId: {},
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
       viewsCount: 0,
-      ratingsByUserId: {},
-      ratingAvg: 0,
-      ratingCount: 0,
       answersCount: 0,
       trophyAnswerId: null,
+      bestAnswerId: null,
       status: "active" as const,
     };
 
+    // ✅ PASO 1: Crear la pregunta (operación crítica)
     try {
       await setDoc(questionRef, questionData);
-    } catch (error: any) {
-      console.error("Error al crear pregunta en Firestore:", error);
-      throw new ServiceError(
-        "questions/create-failed",
-        error?.message || "No se pudo crear la pregunta. Por favor, intenta nuevamente."
-      );
-    }
-
-    // Actualizar contador de preguntas del usuario y dar XP
-    try {
-      const userRef = doc(db, "users", author.id);
-      const userDoc = await getDoc(userRef);
-      
-      // Asegurar que questionsCount exista (inicializar si no existe)
-      if (userDoc.exists()) {
-        const userData = userDoc.data();
-        const currentCount = userData.questionsCount ?? 0;
-        await updateDoc(userRef, {
-          questionsCount: currentCount + 1,
-        });
-      } else {
-        // Si el documento no existe, crearlo con questionsCount = 1
-        await setDoc(userRef, {
-          questionsCount: 1,
-          level: 1,
-          xp: 0,
-          rank: "Novato",
-          answersCount: 0,
-          avgRating: 0,
-        }, { merge: true });
+      console.log(`[createQuestion] ✓ Pregunta creada: ${questionRef.id}`);
+    } catch (e: any) {
+      const errorCode = e?.code || "unknown";
+      if (errorCode === "permission-denied") {
+        throw new ServiceError("permission-denied", "No tienes permisos para crear preguntas");
       }
-      
-      // Dar XP por crear pregunta
-      await reputationService.addXp(author.id, XP_VALUES.QUESTION_PUBLISHED);
-    } catch (error: any) {
-      console.error("Error actualizando contador de preguntas del usuario:", error);
-      // No lanzamos error aquí porque la pregunta ya está creada
+      throw new ServiceError("questions/create-failed", `Error al crear la pregunta: ${safeErr(e)}`);
     }
 
-    // Esperar a que Firestore confirme la creación antes de retornar
-    // Verificar que el documento existe antes de continuar
-    let verifyDoc = await getDoc(questionRef);
-    let attempts = 0;
-    while (!verifyDoc.exists() && attempts < 5) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-      verifyDoc = await getDoc(questionRef);
-      attempts++;
-    }
-
-    if (!verifyDoc.exists()) {
-      console.error("Error: La pregunta no se pudo verificar después de crearla");
-      throw new ServiceError("questions/create-failed", "No se pudo verificar la creación de la pregunta");
-    }
-
-    // Usar firestoreQuestionToQuestion para asegurar consistencia con getQuestionById
-    // Si falla, construir el objeto Question manualmente como fallback
+    // ✅ PASO 2: Actualizar users/{uid}.questionsCount (best-effort, no debe bloquear)
+    const userRef = doc(db, "users", uid);
     try {
-      return await this.firestoreQuestionToQuestion(verifyDoc);
-    } catch (error: any) {
-      console.warn("Error al convertir pregunta desde Firestore, usando fallback:", error);
-      // Fallback: construir Question manualmente con los datos del documento
-      const data = verifyDoc.data();
-      return {
-        id: questionRef.id,
-        title: data.title || title,
-        description: data.description || description,
-        authorId: data.authorId || author.id,
-        authorName: data.authorName || author.name,
-        isAnonymous: data.isAnonymous || Boolean(input.isAnonymous),
-        category: data.category || input.category,
-        tags: data.tags || [...tags],
-        createdAt: data.createdAt ? this.timestampToIso(data.createdAt) : now,
-        updatedAt: data.updatedAt ? this.timestampToIso(data.updatedAt) : now,
-        answers: [], // Nueva pregunta sin respuestas aún
-        viewedByUserId: data.viewedByUserId || {},
-        viewsCount: data.viewsCount || 0,
-        ratingsByUserId: data.ratingsByUserId || {},
-        ratingAvg: data.ratingAvg || 0,
-        ratingCount: data.ratingCount || 0,
-        trophyAnswerId: data.trophyAnswerId || null,
-      };
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) {
+        await updateDoc(userRef, {
+          questionsCount: increment(1),
+          updatedAt: serverTimestamp(),
+        });
+        console.log(`[createQuestion] ✓ questionsCount actualizado para usuario ${uid}`);
+      } else {
+        // Si el documento no existe, crearlo con valores iniciales
+        const userEmail = auth.currentUser?.email || author.email || "";
+        await setDoc(
+          userRef,
+          {
+            uid,
+            name: authorName,
+            displayName: authorName,
+            email: userEmail,
+            role: "USER",
+            level: 1,
+            xp: 0,
+            rank: "Novato",
+            questionsCount: 1,
+            answersCount: 0,
+            savedCount: 0,
+            followedCount: 0,
+            avgRating: 0,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+        console.log(`[createQuestion] ✓ Documento de usuario creado para ${uid}`);
+      }
+    } catch (e: any) {
+      // ✅ Best-effort: si falla la actualización de users, solo loggear warning
+      const errorCode = e?.code || "unknown";
+      const errorMessage = safeErr(e);
+      console.warn(`[createQuestion] ⚠️ No se pudo actualizar users/${uid}.questionsCount (best-effort): ${errorCode} - ${errorMessage}`);
+      // ✅ NO lanzar error - la pregunta ya está creada, esto es secundario
     }
+
+    const questionId = questionRef.id;
+    const maxRetries = 3;
+    const delays = [150, 300, 500];
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const created = await getDoc(questionRef);
+        if (created.exists()) {
+          console.log(`[createQuestion] ✓ Pregunta verificada después de transacción: ${questionId} (intento ${attempt + 1})`);
+          return this.firestoreQuestionToQuestion(created);
+        }
+
+        if (attempt < maxRetries) {
+          const delay = delays[attempt] || 500;
+          console.log(`[createQuestion] ⏳ Esperando propagación (intento ${attempt + 1}/${maxRetries + 1})...`);
+          await new Promise((r) => setTimeout(r, delay));
+          continue;
+        }
+
+        console.error(`[createQuestion] ❌ No se pudo verificar la creación después de ${maxRetries + 1} intentos: ${questionId}`);
+        throw new ServiceError("questions/create-failed", "No se pudo verificar la creación de la pregunta");
+      } catch (e: any) {
+        const errorCode = e?.code || "unknown";
+        if (errorCode === "permission-denied") {
+          throw new ServiceError("permission-denied", "No tienes permisos para crear preguntas");
+        }
+        if (attempt === maxRetries) {
+          console.error(`[createQuestion] ❌ Error después de ${maxRetries + 1} intentos: ${safeErr(e)}`);
+          throw new ServiceError("questions/create-failed", `Error al verificar la creación: ${safeErr(e)}`);
+        }
+        const delay = delays[attempt] || 500;
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
+
+    throw new ServiceError("questions/create-failed", "No se pudo verificar la creación de la pregunta");
   }
 
   async addAnswer(input: AddAnswerInput, author: User): Promise<Answer> {
+    requireDb();
+    const uid = requireAuthUid();
+
     const content = input.content.trim();
-    if (content.length < 2) {
-      throw new ServiceError("validation/invalid-argument", "La respuesta es muy corta");
-    }
+    if (content.length < 2) throw new ServiceError("validation/invalid-argument", "La respuesta es muy corta");
 
-    const question = await this.getQuestionById(input.questionId);
-    if (!question) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
-    }
-
-    const now = nowIso();
-    const answerRef = doc(collection(db, "questions", input.questionId, "answers"));
-    const answerData = {
-      questionId: input.questionId,
-      content,
-      authorId: author.id,
-      authorName: author.name,
-      isAnonymous: Boolean(input.isAnonymous),
-      createdAt: this.isoToTimestamp(now),
-      updatedAt: this.isoToTimestamp(now),
-      ratingsByUserId: {},
-      ratingAvg: 0,
-      ratingCount: 0,
-      hasTrophy: false,
-    };
-
-    await setDoc(answerRef, answerData);
-
-    // Actualizar contador de respuestas en la pregunta
-    const questionRef = doc(db, "questions", input.questionId);
-    await updateDoc(questionRef, {
-      answersCount: increment(1),
-      updatedAt: this.isoToTimestamp(now),
+    const questionRef = doc(db, FIRESTORE_PATHS.QUESTIONS, input.questionId);
+    const questionSnap = await getDoc(questionRef).catch((e: any) => {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para ver esta pregunta");
+      throw new ServiceError("questions/read-failed", `Error al leer la pregunta: ${safeErr(e)}`);
     });
 
-    // Actualizar contador de respuestas del usuario
-    const userRef = doc(db, "users", author.id);
-    const userDoc = await getDoc(userRef);
-    
-    // Asegurar que answersCount exista (inicializar si no existe)
-    if (userDoc.exists()) {
-      const userData = userDoc.data();
-      const currentCount = userData.answersCount ?? 0;
-      await updateDoc(userRef, {
-        answersCount: currentCount + 1,
+    if (!questionSnap.exists()) throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+
+    const qd = questionSnap.data();
+    if (qd?.authorId === uid) throw new ServiceError("validation/invalid-argument", "No puedes responder tu propia pregunta");
+
+    let authorName = (author?.name || "").trim() || "Usuario";
+    try {
+      const u = await getDoc(doc(db, "users", uid));
+      if (u.exists()) {
+        const ud = u.data();
+        authorName = (ud?.name || ud?.displayName || authorName).trim() || authorName;
+      }
+    } catch {}
+
+    const answersRef = collection(db, FIRESTORE_PATHS.answers(input.questionId));
+    const answerRef = doc(answersRef);
+    const path = `questions/${input.questionId}/answers/${answerRef.id}`;
+
+    // ✅ Payload según reglas: authorId == uid, content (string), questionId opcional pero si existe debe coincidir
+    const answerData = {
+      authorId: uid, // ✅ Requerido: authorId == uid()
+      content, // ✅ Requerido: content is string
+      questionId: input.questionId, // ✅ Opcional según reglas, pero incluimos para consistencia
+      authorName,
+      isAnonymous: Boolean(input.isAnonymous),
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+      ratingSum: 0, // Inicializado para que Cloud Functions pueda actualizarlo
+      ratingCount: 0,
+      ratingAvg: 0,
+    };
+
+    try {
+      // ✅ Loguear payload exacto antes de escribir
+      console.log(`[addAnswer] 📝 Escribiendo respuesta en ${path}:`, {
+        path,
+        payload: {
+          authorId: uid,
+          content: content.substring(0, 50) + (content.length > 50 ? "..." : ""), // Preview del contenido
+          questionId: input.questionId,
+          authorName,
+          isAnonymous: Boolean(input.isAnonymous),
+          createdAt: "<serverTimestamp>",
+          updatedAt: "<serverTimestamp>",
+        },
       });
-    } else {
-      // Si el documento no existe, crearlo con answersCount = 1
-      await setDoc(userRef, {
-        answersCount: 1,
-        level: 1,
-        xp: 0,
-        rank: "Novato",
-        questionsCount: 0,
-        avgRating: 0,
-      }, { merge: true });
+
+      await setDoc(answerRef, answerData);
+      console.log(`[addAnswer] ✓ Respuesta guardada exitosamente: ${path}`);
+    } catch (e: any) {
+      const errorCode = e?.code || "unknown";
+      const errorMessage = safeErr(e);
+      console.error(`[addAnswer] ❌ Error en ${path}:`, {
+        errorCode,
+        errorMessage,
+        path,
+        payload: {
+          authorId: uid,
+          questionId: input.questionId,
+          contentLength: content.length,
+        },
+      });
+      if (errorCode === "permission-denied") {
+        throw new ServiceError("permission-denied", "No tienes permisos para crear respuestas en esta pregunta");
+      }
+      throw new ServiceError("answers/create-failed", `Error al crear la respuesta: ${errorMessage}`);
     }
 
-    await reputationService.addXp(author.id, XP_VALUES.ANSWER_PUBLISHED);
+    updateDoc(questionRef, { answersCount: increment(1), updatedAt: serverTimestamp() }).catch((e) =>
+      console.warn(`[addAnswer] answersCount no actualizado: ${safeErr(e)}`)
+    );
 
-    const newAnswer: Answer = {
+    const userRef = doc(db, "users", uid);
+    getDoc(userRef)
+      .then((u) => {
+        if (u.exists()) {
+          return updateDoc(userRef, { answersCount: (u.data()?.answersCount ?? 0) + 1, updatedAt: serverTimestamp() });
+        }
+        const userEmail = auth.currentUser?.email || author.email || "";
+        return setDoc(
+          userRef,
+          {
+            uid,
+            answersCount: 1,
+            level: 1,
+            xp: 0,
+            rank: "Novato",
+            questionsCount: 0,
+            savedCount: 0,
+            followedCount: 0,
+            avgRating: 0,
+            name: authorName,
+            displayName: authorName,
+            email: userEmail,
+            role: "USER",
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+      })
+      .catch((e) => console.warn(`[addAnswer] user answersCount no actualizado: ${safeErr(e)}`));
+
+    const tempAnswer: Answer = {
       id: answerRef.id,
       questionId: input.questionId,
       content,
-      authorId: author.id,
-      authorName: author.name,
+      authorId: uid,
+      authorName,
       isAnonymous: Boolean(input.isAnonymous),
-      createdAt: now,
-      updatedAt: now,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
       ratingsByUserId: {},
       ratingAvg: 0,
       ratingCount: 0,
     };
 
-    if (question.authorId !== author.id) {
-      await notificationsService.create(
-        newAnswerNotification({ userId: question.authorId, questionId: question.id, answerId: newAnswer.id, fromUserId: author.id })
-      );
+    if (qd?.authorId && qd.authorId !== uid) {
+      notificationsService
+        .create(
+          newAnswerNotification({
+            userId: qd.authorId,
+            questionId: input.questionId,
+            answerId: tempAnswer.id,
+            fromUserId: uid,
+          })
+        )
+        .catch((e) => console.warn(`[addAnswer] notif author fail: ${safeErr(e)}`));
     }
 
-    const followedBy = await userDataService.getQuestionFollowers(question.id);
-    for (const followerId of followedBy) {
-      if (followerId !== question.authorId && followerId !== author.id) {
-        await notificationsService.create(
-          newAnswerNotification({ userId: followerId, questionId: question.id, answerId: newAnswer.id, fromUserId: author.id })
-        );
-      }
-    }
+    userDataService
+      .getQuestionFollowers(input.questionId)
+      .then((followers) =>
+        Promise.all(
+          followers
+            .filter((f) => f !== qd?.authorId && f !== uid)
+            .map((f) =>
+              notificationsService.create(
+                newAnswerNotification({
+                  userId: f,
+                  questionId: input.questionId,
+                  answerId: tempAnswer.id,
+                  fromUserId: uid,
+                })
+              )
+            )
+        )
+      )
+      .catch((e) => console.warn(`[addAnswer] notif followers fail: ${safeErr(e)}`));
 
-    // Recalcular trofeo
-    const updatedQuestion = await this.getQuestionById(input.questionId);
-    if (updatedQuestion) {
-      await this.updateTrophyForQuestion(updatedQuestion);
-    }
+    try {
+      const q2 = await this.getQuestionById(input.questionId);
+      const created = q2?.answers?.find((a) => a.id === answerRef.id);
+      if (created) return created;
+    } catch {}
 
-    return newAnswer;
+    return tempAnswer;
   }
 
-  async registerUniqueView(questionId: string, viewer: User): Promise<Question> {
-    const question = await this.getQuestionById(questionId);
-    if (!question) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
-    }
+  async registerUniqueView(questionId: string, _viewer: User): Promise<Question> {
+    requireDb();
+    const uid = auth.currentUser?.uid;
 
-    if (question.viewedByUserId[viewer.id]) {
+    const question = await this.getQuestionById(questionId);
+    if (!question) throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+
+    if (!uid) return question;
+
+    if (question.viewedByUserId?.[uid]) {
       return question;
     }
 
-    const questionRef = doc(db, "questions", questionId);
-    const updatedViewedBy: Record<string, true> = { ...question.viewedByUserId, [viewer.id]: true };
-    await updateDoc(questionRef, {
-      viewedByUserId: updatedViewedBy,
-      viewsCount: Object.keys(updatedViewedBy).length,
-    });
+    const questionRef = doc(db, FIRESTORE_PATHS.QUESTIONS, questionId);
 
-    return {
-      ...question,
-      viewedByUserId: updatedViewedBy,
-      viewsCount: Object.keys(updatedViewedBy).length,
-    };
+    try {
+      const questionSnap = await getDoc(questionRef);
+      if (!questionSnap.exists()) {
+        console.warn(`[registerUniqueView] Pregunta no existe: ${questionId}`);
+        return question;
+      }
+
+      // ✅ Según reglas: solo el autor puede actualizar la pregunta
+      // Si el usuario no es el autor, no podemos actualizar viewedByUserId/viewsCount
+      // Esto es opcional, así que si falla por permisos, simplemente retornamos la pregunta sin actualizar
+      const currentData = questionSnap.data();
+      const isAuthor = currentData?.authorId === uid;
+
+      if (!isAuthor) {
+        // ✅ No es el autor, no podemos actualizar (reglas lo bloquean)
+        // Retornar la pregunta sin actualizar - esto es aceptable
+        console.log(`[registerUniqueView] Usuario ${uid} no es autor, omitiendo actualización de vista`);
+        return question;
+      }
+
+      const currentViewedBy = currentData?.viewedByUserId || {};
+
+      if (!currentViewedBy[uid]) {
+        const newViewedBy = { ...currentViewedBy, [uid]: true };
+        const newViewsCount = Object.keys(newViewedBy).length;
+
+        await updateDoc(questionRef, {
+          viewedByUserId: newViewedBy,
+          viewsCount: newViewsCount,
+          updatedAt: serverTimestamp(),
+        });
+
+        console.log(`[registerUniqueView] ✓ Vista registrada para usuario ${uid}`);
+      }
+
+      const updated = await this.getQuestionById(questionId);
+      return updated ?? question;
+    } catch (e: any) {
+      // ✅ Si falla por permission-denied u otro error, no es crítico
+      // Retornar la pregunta sin actualizar (mejor que fallar)
+      const errorCode = e?.code || "unknown";
+      if (errorCode === "permission-denied") {
+        console.log(`[registerUniqueView] ⚠️ Permission-denied (esperado si no es autor): ${questionId}`);
+      } else {
+        console.warn(`[registerUniqueView] ⚠️ No se pudo registrar vista: ${safeErr(e)}`);
+      }
+      return question;
+    }
   }
 
   async updateQuestion(
     input: { id: string; title: string; description: string; isAnonymous: boolean; category: string; tags: string[] },
-    author: User
+    _author: User
   ): Promise<Question> {
-    const question = await this.getQuestionById(input.id);
-    if (!question) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
-    }
-    if (question.authorId !== author.id) {
-      throw new ServiceError("validation/invalid-argument", "Solo el autor puede editar la pregunta");
-    }
+    const q = await this.getQuestionById(input.id);
+    if (!q) throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+
+    const uid = requireAuthUid();
+    if (q.authorId !== uid) throw new ServiceError("validation/invalid-argument", "Solo el autor puede editar la pregunta");
 
     const title = input.title.trim();
     const description = input.description.trim();
-    if (title.length < 8) {
-      throw new ServiceError("validation/invalid-argument", "El título debe tener al menos 8 caracteres");
-    }
-    if (description.length < 10) {
-      throw new ServiceError("validation/invalid-argument", "La descripción debe tener al menos 10 caracteres");
-    }
 
-    if (!CATEGORIES.includes(input.category as any)) {
-      throw new ServiceError("validation/invalid-argument", "Categoría inválida");
-    }
+    if (title.length < 8) throw new ServiceError("validation/invalid-argument", "El título debe tener al menos 8 caracteres");
+    if (description.length < 10)
+      throw new ServiceError("validation/invalid-argument", "La descripción debe tener al menos 10 caracteres");
+    if (!CATEGORIES.includes(input.category as any)) throw new ServiceError("validation/invalid-argument", "Categoría inválida");
 
     const tags = input.tags || [];
-    if (tags.length < 1 || tags.length > 5) {
+    if (tags.length < 1 || tags.length > 5)
       throw new ServiceError("validation/invalid-argument", "Debes seleccionar entre 1 y 5 etiquetas");
-    }
-    const invalidTags = tags.filter((tag) => !PREDEFINED_TAGS.includes(tag as any));
-    if (invalidTags.length > 0) {
-      throw new ServiceError("validation/invalid-argument", `Etiquetas inválidas: ${invalidTags.join(", ")}`);
+    const invalidTags = tags.filter((t) => !PREDEFINED_TAGS.includes(t as any));
+    if (invalidTags.length) throw new ServiceError("validation/invalid-argument", `Etiquetas inválidas: ${invalidTags.join(", ")}`);
+
+    const questionRef = doc(db, FIRESTORE_PATHS.QUESTIONS, input.id);
+    try {
+      await updateDoc(questionRef, {
+        title,
+        description,
+        isAnonymous: Boolean(input.isAnonymous),
+        category: input.category,
+        tags: [...tags],
+        updatedAt: serverTimestamp(),
+      });
+    } catch (e: any) {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para editar esta pregunta");
+      throw new ServiceError("questions/update-failed", `Error al actualizar la pregunta: ${safeErr(e)}`);
     }
 
-    const now = nowIso();
-    const questionRef = doc(db, "questions", input.id);
-    await updateDoc(questionRef, {
-      title,
-      description,
-      isAnonymous: Boolean(input.isAnonymous),
-      category: input.category,
-      tags: [...tags],
-      updatedAt: this.isoToTimestamp(now),
-    });
-
-    return await this.getQuestionById(input.id) as Question;
+    const updated = await this.getQuestionById(input.id);
+    if (!updated) throw new ServiceError("questions/not-found", "No se pudo recargar la pregunta después de actualizarla");
+    return updated;
   }
 
-  async updateAnswer(input: { questionId: string; answerId: string; content: string }, author: User): Promise<Answer> {
-    const question = await this.getQuestionById(input.questionId);
-    if (!question) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
-    }
+  async updateAnswer(input: { questionId: string; answerId: string; content: string }, _author: User): Promise<Answer> {
+    const q = await this.getQuestionById(input.questionId);
+    if (!q) throw new ServiceError("questions/not-found", "Pregunta no encontrada");
 
-    const answer = question.answers.find((a) => a.id === input.answerId);
-    if (!answer) {
-      throw new ServiceError("questions/not-found", "Respuesta no encontrada");
-    }
-    if (answer.authorId !== author.id) {
-      throw new ServiceError("validation/invalid-argument", "Solo el autor puede editar la respuesta");
-    }
+    const uid = requireAuthUid();
+    const answer = q.answers.find((a) => a.id === input.answerId);
+    if (!answer) throw new ServiceError("questions/not-found", "Respuesta no encontrada");
+    if (answer.authorId !== uid) throw new ServiceError("validation/invalid-argument", "Solo el autor puede editar la respuesta");
 
     const content = input.content.trim();
-    if (content.length < 2) {
-      throw new ServiceError("validation/invalid-argument", "La respuesta es muy corta");
+    if (content.length < 2) throw new ServiceError("validation/invalid-argument", "La respuesta es muy corta");
+
+    const answerRef = doc(db, FIRESTORE_PATHS.answer(input.questionId, input.answerId));
+    try {
+      await updateDoc(answerRef, { content, updatedAt: serverTimestamp() });
+    } catch (e: any) {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para editar esta respuesta");
+      throw new ServiceError("answers/update-failed", `Error al actualizar la respuesta: ${safeErr(e)}`);
     }
 
-    const now = nowIso();
-    const answerRef = doc(db, "questions", input.questionId, "answers", input.answerId);
-    await updateDoc(answerRef, {
-      content,
-      updatedAt: this.isoToTimestamp(now),
-    });
-
-    return {
-      ...answer,
-      content,
-      updatedAt: now,
-    };
+    const q2 = await this.getQuestionById(input.questionId);
+    const updated = q2?.answers.find((a) => a.id === input.answerId);
+    return (
+      updated ?? {
+        ...answer,
+        content,
+        updatedAt: nowIso(),
+      }
+    );
   }
 
-  async rateAnswer(input: { questionId: string; answerId: string; value: number }, rater: User): Promise<Answer> {
-    const question = await this.getQuestionById(input.questionId);
-    if (!question) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
-    }
+  // ✅ Ratings: cliente SOLO escribe el rating.
+  // ✅ XP y trofeos los calcula Cloud Functions (server-side).
+  // ✅ RATING SCOPE ENFORCEMENT: Answer ratings are for display/trophy purposes only.
+  //    Answer ratings should NOT grant XP directly (only trophies grant XP).
+  //    This method only writes the rating document; XP is handled server-side.
+  async rateAnswer(input: { questionId: string; answerId: string; value: number }, _rater: User): Promise<Answer> {
+    requireDb();
+    const raterId = requireAuthUid();
 
-    const answer = question.answers.find((a) => a.id === input.answerId);
-    if (!answer) {
-      throw new ServiceError("questions/not-found", "Respuesta no encontrada");
-    }
-
-    const value = Number(input.value);
-    if (!Number.isFinite(value) || value < 1 || value > 5 || !Number.isInteger(value)) {
-      throw new ServiceError("validation/invalid-argument", "La calificación debe ser entre 1 y 5");
-    }
-    if (answer.ratingsByUserId[rater.id] != null) {
-      throw new ServiceError("validation/invalid-argument", "Solo puedes calificar una vez esta respuesta");
-    }
-
-    const updatedRatings = { ...answer.ratingsByUserId, [rater.id]: value };
-    const all = Object.values(updatedRatings);
-    const ratingCount = all.length;
-    const ratingAvg = all.length ? Math.round((all.reduce((s, v) => s + v, 0) / all.length) * 10) / 10 : 0;
+    const ratingValue = Number(input.value);
+    if (!isValidStars(ratingValue)) throw new ServiceError("validation/invalid-argument", "La calificación debe ser entre 1 y 5");
 
     const answerRef = doc(db, "questions", input.questionId, "answers", input.answerId);
-    await updateDoc(answerRef, {
-      ratingsByUserId: updatedRatings,
-      ratingCount,
-      ratingAvg,
-      updatedAt: this.isoToTimestamp(nowIso()),
-    });
+    const ratingRef = doc(db, "questions", input.questionId, "answers", input.answerId, "ratings", raterId);
+    const ratingsRef = collection(db, "questions", input.questionId, "answers", input.answerId, "ratings");
+    const path = `questions/${input.questionId}/answers/${input.answerId}/ratings/${raterId}`;
 
-    if (value >= 4 && answer.authorId !== rater.id) {
-      await reputationService.addXp(answer.authorId, XP_VALUES.ANSWER_WELL_RATED);
+    // ✅ Verificar si el rating ya existe ANTES de hacer cualquier cosa
+    const existingRatingSnap = await getDoc(ratingRef);
+    if (existingRatingSnap.exists()) {
+      console.log(`[rateAnswer] Rating ignorado: usuario ya calificó esta respuesta (${path})`);
+      const q = await this.getQuestionById(input.questionId);
+      if (!q) throw new ServiceError("questions/not-found", "No se pudo recargar la pregunta");
+      const a = q.answers.find((a) => a.id === input.answerId);
+      if (!a) throw new ServiceError("questions/not-found", "Respuesta no encontrada");
+      return a;
     }
 
-    if (answer.authorId !== rater.id) {
+    // ✅ Leer TODOS los ratings de la respuesta ANTES de la transacción
+    const ratingsSnap = await getDocs(ratingsRef);
+    
+    // Construir objeto ratingsByUserId desde todos los ratings existentes
+    const ratingsByUserId: Record<string, number> = {};
+    for (const ratingDoc of ratingsSnap.docs) {
+      const ratingData = ratingDoc.data();
+      const userId = ratingDoc.id;
+      const value = Number(ratingData?.value);
+      if (isValidStars(value)) {
+        ratingsByUserId[userId] = value;
+      }
+    }
+
+    // ✅ Agregar el nuevo rating (primera vez que este usuario califica)
+    ratingsByUserId[raterId] = ratingValue;
+
+    // Recalcular ratingAvg y ratingCount
+    const { ratingAvg, ratingCount } = this.computeRatingStats(ratingsByUserId);
+
+    // ✅ Payload mínimo según reglas: value (int 1-5), userId opcional pero si existe debe coincidir
+    const ratingPayload = {
+      value: ratingValue, // ✅ Requerido: value is int && value >= 1 && value <= 5
+      userId: raterId, // ✅ Opcional según reglas, pero incluimos para consistencia
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      // ✅ Loguear payload exacto antes de escribir
+      console.log(`[rateAnswer] 📝 Iniciando transacción para rating en ${path}:`, {
+        path,
+        payload: {
+          value: ratingValue,
+          userId: raterId,
+          createdAt: "<serverTimestamp>",
+          updatedAt: "<serverTimestamp>",
+        },
+      });
+
+      // ✅ Usar transacción para garantizar consistencia
+      await runTransaction(db, async (tx) => {
+        // ============================================
+        // PHASE 1: ALL READS FIRST (MANDATORY)
+        // ============================================
+        
+        // 1. Read answer document
+        const answerSnap = await tx.get(answerRef);
+        if (!answerSnap.exists()) {
+          throw new ServiceError("questions/not-found", "Respuesta no encontrada");
+        }
+
+        const answerData = answerSnap.data();
+        const authorId = answerData?.authorId || null;
+        
+        if (!authorId) {
+          throw new ServiceError("validation/invalid-argument", "No se pudo obtener el autor de la respuesta");
+        }
+
+        // 2. Validate: user is NOT the author
+        if (authorId === raterId) {
+          throw new ServiceError("validation/invalid-argument", "No puedes calificar tu propia respuesta");
+        }
+
+        // 3. Read rating document (verify user has NOT rated before)
+        const currentRatingSnap = await tx.get(ratingRef);
+        if (currentRatingSnap.exists()) {
+          console.log(`[rateAnswer] Rating bloqueado: usuario ya calificó esta respuesta (${path}) - ONE-TIME rating enforced`);
+          throw new ServiceError("validation/invalid-argument", "Ya calificaste esta respuesta. Solo puedes calificar una vez.");
+        }
+
+        // 4. Read user document (for XP grant)
+        const userRef = doc(db, "users", authorId);
+        const userSnap = await tx.get(userRef);
+        
+        // 5. Read publicProfile document (for XP grant)
+        const publicProfileRef = doc(db, "publicProfiles", authorId);
+        const publicProfileSnap = await tx.get(publicProfileRef);
+        
+        console.log(`[rateAnswer] all reads completed`);
+
+        // ============================================
+        // PHASE 2: ALL WRITES (AFTER ALL READS)
+        // ============================================
+        
+        // 1. Create rating document
+        tx.set(ratingRef, ratingPayload);
+        console.log(`[rateAnswer] rating created`);
+
+        // 2. Update answer document with aggregated stats
+        tx.update(answerRef, {
+          ratingAvg,
+          ratingCount,
+          updatedAt: serverTimestamp(),
+        });
+        console.log(`[rateAnswer] answer updated with ratingAvg=${ratingAvg}, ratingCount=${ratingCount}`);
+
+        // 3. Grant XP (only on first rating, rater !== author)
+        const xpToAdd = getXpByStars(ratingValue);
+        if (xpToAdd > 0) {
+          const userEmail = auth.currentUser?.email || "";
+          const newXp = syncXpChangeWithSnapshots(
+            tx,
+            db,
+            authorId,
+            userSnap,
+            publicProfileSnap,
+            xpToAdd,
+            userEmail
+          );
+          const newLevel = calculateLevel(newXp);
+          const newRank = calculateRank(newLevel);
+          
+          console.log(`[rateAnswer] XP granted to author: ${xpToAdd} XP a usuario ${authorId} por rating de ${ratingValue} estrellas (nuevo XP: ${newXp}, nivel: ${newLevel}, rango: ${newRank})`);
+        }
+      });
+
+      console.log(`[rateAnswer] ✓ Rating guardado exitosamente: ${path}, value=${ratingValue}`);
+    } catch (e: any) {
+      const errorCode = e?.code || "unknown";
+      const errorMessage = safeErr(e);
+      
+      // ✅ Manejar errores específicos de ServiceError
+      if (e instanceof ServiceError) {
+        throw e;
+      }
+
+      console.error(`[rateAnswer] ❌ Error en ${path}:`, {
+        errorCode,
+        errorMessage,
+        path,
+        payload: ratingPayload,
+      });
+      
+      if (errorCode === "permission-denied") {
+        throw new ServiceError("permission-denied", "No tienes permisos para calificar esta respuesta");
+      }
+      throw new ServiceError("ratings/create-failed", `Error al calificar la respuesta: ${errorMessage}`);
+    }
+
+    // ✅ Obtener la respuesta actualizada para notificaciones y retorno
+    const q = await this.getQuestionById(input.questionId);
+    if (!q) throw new ServiceError("questions/not-found", "No se pudo recargar la pregunta después de calificar");
+    
+    const updated = q.answers.find((a) => a.id === input.answerId);
+    if (!updated) throw new ServiceError("questions/not-found", "Respuesta no encontrada después de calificar");
+
+    // ✅ Recalculate and persist author's average rating including BOTH question and answer ratings
+    // This must be done AFTER transaction to avoid read-after-write issues
+    try {
+      const authorId = updated.authorId;
+      if (authorId && authorId !== raterId) {
+        // ✅ Calculate avgRating including both question and answer ratings
+        const averageRating = await this.calculateAvgRatingIncludingAnswers(authorId);
+        
+        // ✅ Update users/{userId} FIRST (source of truth)
+        const userRef = doc(db, "users", authorId);
+        await updateDoc(userRef, {
+          avgRating: averageRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          // If document doesn't exist, create it
+          const existingSnap = await getDoc(userRef);
+          if (!existingSnap.exists()) {
+            await setDoc(userRef, {
+              uid: authorId,
+              avgRating: averageRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+        
+        // ✅ Then update publicProfiles/{userId} as projection of users/{userId}
+        const publicProfileRef = doc(db, "publicProfiles", authorId);
+        await updateDoc(publicProfileRef, {
+          avgRating: averageRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          // If document doesn't exist, create it
+          const existingSnap = await getDoc(publicProfileRef);
+          if (!existingSnap.exists()) {
+            await setDoc(publicProfileRef, {
+              userId: authorId,
+              uid: authorId,
+              avgRating: averageRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+        
+        console.log(`[rateAnswer] ✓ Average rating updated for author ${authorId}: ${averageRating} (including answer ratings) - synced to users and publicProfiles`);
+      }
+    } catch (e: any) {
+      // Best-effort: don't break rating flow if average calculation fails
+      console.warn(`[rateAnswer] ⚠️ Error calculating average rating (best-effort): ${safeErr(e)}`);
+    }
+
+    // Notificación (secundario)
+    try {
       await notificationsService.create(
         answerRatedNotification({
-          userId: answer.authorId,
-          questionId: question.id,
-          answerId: answer.id,
-          fromUserId: rater.id,
-          rating: value,
-          ratingAvg,
+          userId: updated.authorId,
+          questionId: input.questionId,
+          answerId: updated.id,
+          fromUserId: raterId,
+          rating: ratingValue,
+          ratingAvg: updated.ratingAvg,
         })
       );
+    } catch (e: any) {
+      console.warn(`[rateAnswer] notif fail: ${safeErr(e)}`);
     }
 
-    const updatedQuestion = await this.getQuestionById(input.questionId);
-    if (updatedQuestion) {
-      await this.updateTrophyForQuestion(updatedQuestion);
-    }
-
-    return {
-      ...answer,
-      ratingsByUserId: updatedRatings,
-      ratingCount,
-      ratingAvg,
-      updatedAt: nowIso(),
-    };
+    return updated;
   }
 
-  async rateQuestion(input: { questionId: string; value: number }, rater: User): Promise<Question> {
-    const question = await this.getQuestionById(input.questionId);
-    if (!question) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+  async rateQuestion(input: { questionId: string; value: number }, _rater: User): Promise<Question> {
+    requireDb();
+    const raterId = requireAuthUid();
+
+    const ratingValue = Number(input.value);
+    if (!isValidStars(ratingValue)) throw new ServiceError("validation/invalid-argument", "La calificación debe ser entre 1 y 5");
+
+    const questionRef = doc(db, FIRESTORE_PATHS.QUESTIONS, input.questionId);
+    const ratingRef = doc(db, "questions", input.questionId, "ratings", raterId);
+    const ratingsRef = collection(db, "questions", input.questionId, "ratings");
+    const path = `questions/${input.questionId}/ratings/${raterId}`;
+
+    // ✅ Verificar si el rating ya existe ANTES de hacer cualquier cosa
+    // Esto previene re-calificaciones y asegura que XP solo se otorgue una vez
+    const existingRatingSnap = await getDoc(ratingRef);
+    if (existingRatingSnap.exists()) {
+      console.log(`[rateQuestion] Rating ignorado: usuario ya calificó esta pregunta (${path})`);
+      // ✅ Retornar la pregunta actual sin hacer cambios (silenciosamente, sin error)
+      const q = await this.getQuestionById(input.questionId);
+      if (!q) throw new ServiceError("questions/not-found", "No se pudo recargar la pregunta");
+      return q;
     }
 
-    const value = Number(input.value);
-    if (!Number.isFinite(value) || value < 1 || value > 5 || !Number.isInteger(value)) {
-      throw new ServiceError("validation/invalid-argument", "La calificación debe ser entre 1 y 5");
+    // ✅ Payload con ambos campos: value (para compatibilidad) y stars (para consistencia)
+    const ratingPayload = {
+      value: ratingValue, // ✅ Requerido: value is int && value >= 1 && value <= 5
+      stars: ratingValue, // ✅ Incluido para consistencia
+      userId: raterId, // ✅ Opcional según reglas, pero incluimos para consistencia
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      // ✅ RATING SCOPE ENFORCEMENT: Question ratings grant XP to the question author.
+      //    This is the ONLY place where ratings grant XP directly.
+      //    Answer ratings do NOT grant XP (they only affect trophies).
+      // ✅ Loguear payload exacto antes de escribir
+      console.log(`[rateQuestion] 📝 Iniciando transacción para rating en ${path}:`, {
+        path,
+        payload: {
+          value: ratingValue,
+          stars: ratingValue,
+          userId: raterId,
+          createdAt: "<serverTimestamp>",
+          updatedAt: "<serverTimestamp>",
+        },
+      });
+
+      // ✅ Leer TODOS los ratings de la pregunta ANTES de la transacción
+      // Nota: No podemos usar getDocs() dentro de una transacción de Firestore
+      // Leer la colección justo antes de la transacción minimiza la ventana de race condition
+      // La transacción garantiza que las escrituras sean atómicas
+      const ratingsSnap = await getDocs(ratingsRef);
+      
+      // Construir objeto ratingsByUserId desde todos los ratings existentes
+      const ratingsByUserId: Record<string, number> = {};
+      for (const ratingDoc of ratingsSnap.docs) {
+        const ratingData = ratingDoc.data();
+        const userId = ratingDoc.id;
+        const value = Number(ratingData?.value);
+        if (isValidStars(value)) {
+          ratingsByUserId[userId] = value;
+        }
+      }
+
+      // ✅ Agregar el nuevo rating (primera vez que este usuario califica)
+      ratingsByUserId[raterId] = ratingValue;
+
+      // Recalcular ratingAvg y ratingCount (solo se actualiza en primera calificación)
+      const { ratingAvg, ratingCount } = this.computeRatingStats(ratingsByUserId);
+
+      // ✅ Usar transacción para garantizar consistencia y evitar race conditions
+      // CRITICAL: ALL reads MUST be executed BEFORE any writes
+      const xpToAdd = getXpByStars(ratingValue);
+      let authorId: string | null = null;
+      
+      await runTransaction(db, async (tx) => {
+        // ============================================
+        // PHASE 1: ALL READS FIRST (MANDATORY)
+        // ============================================
+        
+        // 1. Read question document
+        const questionSnap = await tx.get(questionRef);
+        if (!questionSnap.exists()) {
+          throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+        }
+
+        const questionData = questionSnap.data();
+        authorId = questionData?.authorId || null;
+        
+        if (!authorId) {
+          throw new ServiceError("validation/invalid-argument", "No se pudo obtener el autor de la pregunta");
+        }
+
+        // 2. Read rating document (verify user has NOT rated before)
+        // ✅ FIX 1: Enforce ONE-TIME rating - if exists, EXIT immediately
+        const currentRatingSnap = await tx.get(ratingRef);
+        if (currentRatingSnap.exists()) {
+          console.log(`[rateQuestion] Rating bloqueado: usuario ya calificó esta pregunta (${path}) - ONE-TIME rating enforced`);
+          return; // Exit without ANY changes - rating is immutable after creation
+        }
+
+        // 3. Validate: user is NOT the author
+        if (authorId === raterId) {
+          throw new ServiceError("validation/invalid-argument", "No puedes calificar tu propia pregunta");
+        }
+
+        // 4. Read user document (for XP grant)
+        const userRef = doc(db, "users", authorId);
+        const userSnap = await tx.get(userRef);
+        
+        // 5. Read publicProfile document (for XP grant)
+        const publicProfileRef = doc(db, "publicProfiles", authorId);
+        const publicProfileSnap = await tx.get(publicProfileRef);
+        
+        console.log(`[rateQuestion] all reads completed`);
+
+        // ============================================
+        // PHASE 2: ALL WRITES (AFTER ALL READS)
+        // ============================================
+        
+        // 1. Create rating document
+        tx.set(ratingRef, ratingPayload);
+        console.log(`[rateQuestion] rating created`);
+
+        // 2. Update question document
+        tx.update(questionRef, {
+          ratingAvg,
+          ratingCount,
+          updatedAt: serverTimestamp(),
+        });
+
+        // 3. Grant XP (only on first rating, rater !== author)
+        if (xpToAdd > 0) {
+          // ✅ FIX 1: Sync XP between /users/{authorId} and /publicProfiles/{authorId}
+          const userEmail = auth.currentUser?.email || "";
+          const newXp = syncXpChangeWithSnapshots(
+            tx,
+            db,
+            authorId,
+            userSnap,
+            publicProfileSnap,
+            xpToAdd,
+            userEmail
+          );
+          const newLevel = calculateLevel(newXp);
+          const newRank = calculateRank(newLevel);
+          
+          console.log(`[rateQuestion] XP granted to author: ${xpToAdd} XP a usuario ${authorId} por rating de ${ratingValue} estrellas (nuevo XP: ${newXp}, nivel: ${newLevel}, rango: ${newRank})`);
+        }
+      });
+
+      console.log(`[rateQuestion] ✓ Rating guardado exitosamente: ${path}, value=${ratingValue}`);
+    } catch (e: any) {
+      const errorCode = e?.code || "unknown";
+      const errorMessage = safeErr(e);
+      
+      // ✅ Manejar errores específicos de ServiceError
+      if (e instanceof ServiceError) {
+        throw e;
+      }
+
+      console.error(`[rateQuestion] ❌ Error en ${path}:`, {
+        errorCode,
+        errorMessage,
+        path,
+        payload: ratingPayload,
+      });
+      
+      if (errorCode === "permission-denied") {
+        throw new ServiceError("permission-denied", "No tienes permisos para calificar esta pregunta");
+      }
+      throw new ServiceError("ratings/create-failed", `Error al calificar la pregunta: ${errorMessage}`);
     }
-    if (question.ratingsByUserId[rater.id] != null) {
-      throw new ServiceError("validation/invalid-argument", "Solo puedes calificar una vez esta pregunta");
+
+    // ✅ Obtener la pregunta actualizada para notificaciones y retorno
+    const q = await this.getQuestionById(input.questionId);
+    if (!q) throw new ServiceError("questions/not-found", "No se pudo recargar la pregunta después de calificar");
+
+    // ✅ Recalculate and persist author's average rating including BOTH question and answer ratings
+    // This must be done AFTER transaction to avoid read-after-write issues
+    try {
+      const authorId = q.authorId;
+      if (authorId && authorId !== raterId) {
+        // ✅ Calculate avgRating including both question and answer ratings
+        const averageRating = await this.calculateAvgRatingIncludingAnswers(authorId);
+        
+        // ✅ Update users/{userId} FIRST (source of truth)
+        const userRef = doc(db, "users", authorId);
+        await updateDoc(userRef, {
+          avgRating: averageRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          // If document doesn't exist, create it
+          const existingSnap = await getDoc(userRef);
+          if (!existingSnap.exists()) {
+            await setDoc(userRef, {
+              uid: authorId,
+              avgRating: averageRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+        
+        // ✅ Then update publicProfiles/{userId} as projection of users/{userId}
+        const publicProfileRef = doc(db, "publicProfiles", authorId);
+        await updateDoc(publicProfileRef, {
+          avgRating: averageRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          // If document doesn't exist, create it
+          const existingSnap = await getDoc(publicProfileRef);
+          if (!existingSnap.exists()) {
+            await setDoc(publicProfileRef, {
+              userId: authorId,
+              uid: authorId,
+              avgRating: averageRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+        
+        console.log(`[rateQuestion] ✓ Average rating updated for author ${authorId}: ${averageRating} (including question and answer ratings) - synced to users and publicProfiles`);
+      }
+    } catch (e: any) {
+      // Best-effort: don't break rating flow if average calculation fails
+      console.warn(`[rateQuestion] ⚠️ Error calculating average rating (best-effort): ${safeErr(e)}`);
     }
 
-    const updatedRatings = { ...question.ratingsByUserId, [rater.id]: value };
-    const all = Object.values(updatedRatings);
-    const ratingCount = all.length;
-    const ratingAvg = all.length ? Math.round((all.reduce((s, v) => s + v, 0) / all.length) * 10) / 10 : 0;
-
-    const questionRef = doc(db, "questions", input.questionId);
-    await updateDoc(questionRef, {
-      ratingsByUserId: updatedRatings,
-      ratingCount,
-      ratingAvg,
-      updatedAt: this.isoToTimestamp(nowIso()),
-    });
-
-    if (value >= 4 && question.authorId !== rater.id) {
-      await reputationService.addXp(question.authorId, XP_VALUES.QUESTION_WELL_RATED);
+    // Notificaciones (secundario)
+    try {
+      await notificationsService.create(
+        questionRatedNotification({
+          userId: q.authorId,
+          questionId: input.questionId,
+          fromUserId: raterId,
+          rating: ratingValue,
+          ratingAvg: q.ratingAvg,
+        })
+      );
+    } catch (e: any) {
+      console.warn(`[rateQuestion] notif author fail: ${safeErr(e)}`);
     }
 
-    return await this.getQuestionById(input.questionId) as Question;
+    // ✅ Notificaciones a followers (best-effort, no debe romper el flujo)
+    userDataService
+      .getQuestionFollowers(input.questionId)
+      .then(async (followers) => {
+        if (followers.length === 0) return; // ✅ No hay seguidores, no hacer nada
+
+        await Promise.all(
+          followers
+            .filter((f) => f !== q.authorId && f !== raterId)
+            .map((f) =>
+              notificationsService.create(
+                questionRatedNotification({
+                  userId: f,
+                  questionId: input.questionId,
+                  fromUserId: raterId,
+                  rating: ratingValue,
+                  ratingAvg: q.ratingAvg,
+                })
+              ).catch((notifErr: any) => {
+                // ✅ No loggear cada notificación fallida individualmente (spam)
+                // Solo loggear si es crítico
+                if (notifErr?.code !== "permission-denied") {
+                  console.warn(`[rateQuestion] ⚠️ Error creando notificación para follower ${f}: ${notifErr?.code || "unknown"}`);
+                }
+              })
+            )
+        );
+      })
+      .catch((followersErr: any) => {
+        // ✅ No romper el flujo si getQuestionFollowers falla
+        const errorCode = followersErr?.code || "unknown";
+        if (errorCode !== "permission-denied") {
+          console.warn(`[rateQuestion] ⚠️ Error obteniendo followers (no bloquea): ${errorCode} - ${safeErr(followersErr)}`);
+        }
+      });
+
+    return q;
   }
 
   async listQuestionsByAuthorId(authorId: string): Promise<Question[]> {
-    const questionsRef = collection(db, "questions");
-    const q = query(questionsRef, where("authorId", "==", authorId), orderBy("createdAt", "desc"));
-    const snapshot = await getDocs(q);
-    
-    const questions: Question[] = [];
-    for (const questionDoc of snapshot.docs) {
-      const question = await this.firestoreQuestionToQuestion(questionDoc);
-      questions.push(question);
-    }
-    
-    return questions;
-  }
+    requireDb();
 
-  async listAnswersByAuthorId(authorId: string): Promise<Array<{ questionId: string; answerId: string; content: string; createdAt: string }>> {
-    // Obtener todas las preguntas y buscar respuestas del autor
-    const allQuestions = await this.listQuestions();
-    const items: Array<{ questionId: string; answerId: string; content: string; createdAt: string }> = [];
-    
-    for (const question of allQuestions) {
-      for (const answer of question.answers) {
-        if (answer.authorId === authorId) {
-          items.push({
-            questionId: question.id,
-            answerId: answer.id,
-            content: answer.content,
-            createdAt: answer.createdAt,
-          });
-        }
+    const ref = collection(db, FIRESTORE_PATHS.QUESTIONS);
+    let snap;
+    try {
+      snap = await getDocs(query(ref, where("authorId", "==", authorId), orderBy("createdAt", "desc")));
+    } catch (e: any) {
+      console.warn(`[listQuestionsByAuthorId] orderBy fallback: ${safeErr(e)}`);
+      snap = await getDocs(query(ref, where("authorId", "==", authorId)));
+    }
+
+    const out: Question[] = [];
+    for (const d of snap.docs) {
+      try {
+        out.push(await this.firestoreQuestionToQuestion(d));
+      } catch (e: any) {
+        console.warn(`[listQuestionsByAuthorId] skip ${d.id}: ${safeErr(e)}`);
       }
     }
-    
-    return items.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+
+    out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return out;
+  }
+
+  async listAnswersByAuthorId(
+    authorId: string
+  ): Promise<Array<{ questionId: string; answerId: string; content: string; createdAt: string }>> {
+    requireDb();
+
+    try {
+      const cg = collectionGroup(db, "answers");
+      const snap = await getDocs(query(cg, where("authorId", "==", authorId), orderBy("createdAt", "desc")));
+      return snap.docs.map((d) => {
+        const data = d.data();
+        const parts = d.ref.path.split("/");
+        const qid = parts[1];
+        return {
+          questionId: qid,
+          answerId: d.id,
+          content: data.content || "",
+          createdAt: this.timestampToIso(data.createdAt),
+        };
+      });
+    } catch (e: any) {
+      console.warn(`[listAnswersByAuthorId] collectionGroup fallback: ${safeErr(e)}`);
+    }
+
+    const questionsRef = collection(db, FIRESTORE_PATHS.QUESTIONS);
+    const questionsSnap = await getDocs(questionsRef);
+
+    const all: Array<{ questionId: string; answerId: string; content: string; createdAt: string }> = [];
+
+    for (const qd of questionsSnap.docs) {
+      const qid = qd.id;
+      const answersRef = collection(db, FIRESTORE_PATHS.answers(qid));
+      try {
+        const snap = await getDocs(query(answersRef, where("authorId", "==", authorId)));
+        for (const ad of snap.docs) {
+          const a = ad.data();
+          all.push({
+            questionId: qid,
+            answerId: ad.id,
+            content: a.content || "",
+            createdAt: this.timestampToIso(a.createdAt),
+          });
+        }
+      } catch (e: any) {
+        console.warn(`[listAnswersByAuthorId] skip q=${qid}: ${safeErr(e)}`);
+      }
+    }
+
+    all.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    return all;
   }
 
   async syncQuestionsCount(userId: string): Promise<number> {
-    // Contar las preguntas reales del usuario en Firestore
-    const questionsRef = collection(db, "questions");
-    const q = query(
-      questionsRef,
-      where("authorId", "==", userId),
-      where("status", "==", "active")
-    );
-    const snapshot = await getDocs(q);
-    const realCount = snapshot.size;
+    requireDb();
 
-    // Actualizar el contador en el documento del usuario
+    const questionsRef = collection(db, FIRESTORE_PATHS.QUESTIONS);
+    const snap = await getDocs(query(questionsRef, where("authorId", "==", userId), where("status", "==", "active")));
+    const realCount = snap.size;
+
     const userRef = doc(db, "users", userId);
-    const userDoc = await getDoc(userRef);
-    
-    if (userDoc.exists()) {
-      await updateDoc(userRef, {
-        questionsCount: realCount,
-      });
+    const userSnap = await getDoc(userRef);
+
+    if (userSnap.exists()) {
+      await updateDoc(userRef, { questionsCount: realCount, updatedAt: serverTimestamp() });
     } else {
-      // Si el documento no existe, crearlo
-      await setDoc(userRef, {
-        questionsCount: realCount,
-        level: 1,
-        xp: 0,
-        rank: "Novato",
-        answersCount: 0,
-        avgRating: 0,
-      }, { merge: true });
+      await setDoc(
+        userRef,
+        {
+          questionsCount: realCount,
+          answersCount: 0,
+          savedCount: 0,
+          followedCount: 0,
+          level: 1,
+          xp: 0,
+          rank: "Novato",
+          avgRating: 0,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+        { merge: true }
+      );
     }
 
     return realCount;
   }
 
+  async syncAnswersCount(userId: string): Promise<number> {
+    requireDb();
+
+    try {
+      const cg = collectionGroup(db, "answers");
+      const snap = await getDocs(query(cg, where("authorId", "==", userId)));
+      const count = snap.size;
+
+      const userRef = doc(db, "users", userId);
+      const userSnap = await getDoc(userRef);
+      if (userSnap.exists()) await updateDoc(userRef, { answersCount: count, updatedAt: serverTimestamp() });
+      else
+        await setDoc(userRef, { answersCount: count, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true });
+
+      return count;
+    } catch {}
+
+    const questionsRef = collection(db, FIRESTORE_PATHS.QUESTIONS);
+    const questionsSnap = await getDocs(questionsRef);
+
+    let count = 0;
+    for (const qd of questionsSnap.docs) {
+      try {
+        const answersRef = collection(db, FIRESTORE_PATHS.answers(qd.id));
+        const snap = await getDocs(query(answersRef, where("authorId", "==", userId)));
+        count += snap.size;
+      } catch {}
+    }
+
+    const userRef = doc(db, "users", userId);
+    const userSnap = await getDoc(userRef);
+    if (userSnap.exists()) await updateDoc(userRef, { answersCount: count, updatedAt: serverTimestamp() });
+    else await setDoc(userRef, { answersCount: count, createdAt: serverTimestamp(), updatedAt: serverTimestamp() }, { merge: true });
+
+    return count;
+  }
+
+  async recalculateStats(userId: string): Promise<{ questionsCount: number; answersCount: number }> {
+    const questionsCount = await this.syncQuestionsCount(userId);
+    const answersCount = await this.syncAnswersCount(userId);
+    return { questionsCount, answersCount };
+  }
+
   async syncAuthorName(authorId: string, newName: string): Promise<void> {
-    // Actualizar nombre en todas las preguntas del autor
-    const questionsRef = collection(db, "questions");
-    const q = query(questionsRef, where("authorId", "==", authorId));
-    const snapshot = await getDocs(q);
-    
-    const batch = writeBatch(db);
-    for (const questionDoc of snapshot.docs) {
-      batch.update(questionDoc.ref, { authorName: newName });
+    requireDb();
+
+    try {
+      const questionsRef = collection(db, FIRESTORE_PATHS.QUESTIONS);
+      const qSnap = await getDocs(query(questionsRef, where("authorId", "==", authorId)));
+
+      const batch = writeBatch(db);
+      let count = 0;
+
+      for (const d of qSnap.docs) {
+        batch.update(d.ref, { authorName: newName });
+        count++;
+      }
+
+      for (const d of qSnap.docs) {
+        const qid = d.id;
+        const answersRef = collection(db, FIRESTORE_PATHS.answers(qid));
+        try {
+          const aSnap = await getDocs(query(answersRef, where("authorId", "==", authorId)));
+          for (const ad of aSnap.docs) {
+            batch.update(ad.ref, { authorName: newName });
+            count++;
+          }
+        } catch {}
+      }
+
+      if (count) await batch.commit();
+    } catch (e: any) {
+      throw new ServiceError("questions/sync-failed", `Error al sincronizar el nombre del autor: ${safeErr(e)}`);
+    }
+  }
+
+  // ✅ Helper to calculate avgRating including BOTH question and answer ratings
+  private async calculateAvgRatingIncludingAnswers(authorId: string, excludedQuestionId?: string, excludedAnswerId?: string): Promise<number> {
+    try {
+      // Get all questions by this author
+      const authorQuestions = await this.listQuestionsByAuthorId(authorId);
       
-      // Actualizar nombre en todas las respuestas del autor en esta pregunta
-      const answersSnapshot = await getDocs(collection(db, "questions", questionDoc.id, "answers"));
-      for (const answerDoc of answersSnapshot.docs) {
-        const answerData = answerDoc.data();
-        if (answerData.authorId === authorId) {
-          batch.update(answerDoc.ref, { authorName: newName });
+      // Calculate ratings from questions
+      let totalRatings = 0;
+      let totalStars = 0;
+      
+      for (const question of authorQuestions) {
+        // Exclude the question if specified
+        if (excludedQuestionId && question.id === excludedQuestionId) continue;
+        
+        if (question.ratingCount > 0 && question.ratingAvg > 0) {
+          totalRatings += question.ratingCount;
+          totalStars += question.ratingAvg * question.ratingCount;
         }
       }
+      
+      // Get all answers by this author and include their ratings
+      const authorAnswers = await this.listAnswersByAuthorId(authorId);
+      
+      // Fetch answer documents to get ratingAvg and ratingCount
+      for (const answerInfo of authorAnswers) {
+        // Exclude the answer if specified
+        if (excludedAnswerId && answerInfo.answerId === excludedAnswerId) continue;
+        
+        try {
+          const answerRef = doc(db, FIRESTORE_PATHS.answer(answerInfo.questionId, answerInfo.answerId));
+          const answerSnap = await getDoc(answerRef);
+          
+          if (answerSnap.exists()) {
+            const answerData = answerSnap.data();
+            const ratingCount = Number(answerData?.ratingCount || 0);
+            const ratingAvg = Number(answerData?.ratingAvg || 0);
+            
+            if (ratingCount > 0 && ratingAvg > 0) {
+              totalRatings += ratingCount;
+              totalStars += ratingAvg * ratingCount;
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[calculateAvgRatingIncludingAnswers] ⚠️ Error leyendo respuesta ${answerInfo.answerId} (best-effort): ${safeErr(e)}`);
+        }
+      }
+      
+      return totalRatings > 0 ? Math.round((totalStars / totalRatings) * 10) / 10 : 0;
+    } catch (e: any) {
+      console.warn(`[calculateAvgRatingIncludingAnswers] Error calculando avgRating (best-effort): ${safeErr(e)}`);
+      return 0;
     }
-    
-    await batch.commit();
   }
 
-  async deleteQuestion(questionId: string, adminUser: User): Promise<void> {
-    if (adminUser.role !== "ADMIN") {
-      throw new ServiceError("validation/invalid-argument", "Solo administradores pueden eliminar preguntas");
+  // ✅ DOMAIN FUNCTION: Delete question with all side effects
+  // - Reverts XP from question and answer ratings
+  // - Updates avgRating
+  // - Decrements savedCount/followedCount for affected users
+  // - Updates questionsCount and publicProfiles
+  async deleteQuestionWithSideEffects(questionId: string, actor: User): Promise<void> {
+    requireDb();
+    const uid = requireAuthUid();
+
+    const q = await this.getQuestionById(questionId);
+    if (!q) throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+
+    const isAdmin = actor?.role === "ADMIN";
+    if (!isAdmin && q.authorId !== uid) {
+      throw new ServiceError("validation/invalid-argument", "Solo el autor o administradores pueden eliminar preguntas");
     }
 
-    const questionRef = doc(db, "questions", questionId);
-    const questionDoc = await getDoc(questionRef);
-    
-    if (!questionDoc.exists()) {
-      throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+    const questionRef = doc(db, FIRESTORE_PATHS.QUESTIONS, questionId);
+    const answersRef = collection(db, FIRESTORE_PATHS.answers(questionId));
+    const answersSnap = await getDocs(answersRef);
+
+    const authorId = q.authorId;
+    const userRef = authorId ? doc(db, "users", authorId) : null;
+
+    // ✅ Obtener lista de usuarios que guardaron/siguieron esta pregunta para actualizar sus contadores
+    const savedUserIds: string[] = [];
+    const followedUserIds: string[] = [];
+    try {
+      // Obtener usuarios que guardaron esta pregunta (el docId es el questionId)
+      const savedQuestionsRef = collectionGroup(db, "savedQuestions");
+      const savedSnap = await getDocs(savedQuestionsRef);
+      for (const doc of savedSnap.docs) {
+        if (doc.id === questionId) {
+          // El userId está en la ruta: users/{userId}/savedQuestions/{questionId}
+          const pathParts = doc.ref.path.split('/');
+          const userIdIndex = pathParts.indexOf('users');
+          if (userIdIndex >= 0 && userIdIndex < pathParts.length - 1) {
+            const userId = pathParts[userIdIndex + 1];
+            if (userId) savedUserIds.push(userId);
+          }
+        }
+      }
+
+      // Obtener usuarios que siguen esta pregunta (el docId es el questionId)
+      const followedQuestionsRef = collectionGroup(db, "followedQuestions");
+      const followedSnap = await getDocs(followedQuestionsRef);
+      for (const doc of followedSnap.docs) {
+        if (doc.id === questionId) {
+          // El userId está en la ruta: users/{userId}/followedQuestions/{questionId}
+          const pathParts = doc.ref.path.split('/');
+          const userIdIndex = pathParts.indexOf('users');
+          if (userIdIndex >= 0 && userIdIndex < pathParts.length - 1) {
+            const userId = pathParts[userIdIndex + 1];
+            if (userId) followedUserIds.push(userId);
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[deleteQuestion] ⚠️ No se pudieron verificar saved/followed (best-effort): ${safeErr(e)}`);
     }
 
-    // Eliminar todas las respuestas primero
-    const answersSnapshot = await getDocs(collection(db, "questions", questionId, "answers"));
-    const batch = writeBatch(db);
-    for (const answerDoc of answersSnapshot.docs) {
-      batch.delete(answerDoc.ref);
-    }
-    batch.delete(questionRef);
-    await batch.commit();
-
-    // Actualizar contador del usuario
-    const authorId = questionDoc.data().authorId;
-    if (authorId) {
-      const userRef = doc(db, "users", authorId);
-      await updateDoc(userRef, {
-        questionsCount: increment(-1),
-      });
-    }
-  }
-
-  async deleteAnswer(questionId: string, answerId: string, adminUser: User): Promise<void> {
-    if (adminUser.role !== "ADMIN") {
-      throw new ServiceError("validation/invalid-argument", "Solo administradores pueden eliminar respuestas");
-    }
-
-    const answerRef = doc(db, "questions", questionId, "answers", answerId);
-    const answerDoc = await getDoc(answerRef);
-    
-    if (!answerDoc.exists()) {
-      throw new ServiceError("questions/not-found", "Respuesta no encontrada");
+    // ✅ Calculate total XP granted by this question's ratings BEFORE transaction
+    const ratingsRef = collection(db, "questions", questionId, "ratings");
+    let totalXpToSubtract = 0;
+    const questionRatings: Array<{ stars: number; raterId: string }> = [];
+    try {
+      const ratingsSnap = await getDocs(ratingsRef);
+      for (const ratingDoc of ratingsSnap.docs) {
+        const ratingData = ratingDoc.data();
+        const stars = Number(ratingData?.value || ratingData?.stars || 0);
+        if (isValidStars(stars)) {
+          const raterId = ratingDoc.id;
+          questionRatings.push({ stars, raterId });
+          // Only count XP if rater is not the author (XP is only granted when rater !== author)
+          if (raterId !== authorId) {
+            const xpGranted = getXpByStars(stars);
+            totalXpToSubtract += xpGranted;
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[deleteQuestionWithSideEffects] ⚠️ No se pudieron leer ratings para calcular XP a revertir (best-effort): ${safeErr(e)}`);
     }
 
-    await deleteDoc(answerRef);
+    // Calculate XP from all answer ratings before transaction
+    const answerAuthorXpMap: Record<string, number> = {};
+    for (const answerDoc of answersSnap.docs) {
+      const answerData = answerDoc.data();
+      const answerAuthorId = answerData?.authorId;
+      if (!answerAuthorId) continue;
 
-    // Actualizar contador de respuestas en la pregunta
-    const questionRef = doc(db, "questions", questionId);
-    await updateDoc(questionRef, {
-      answersCount: increment(-1),
+      const answerRatingsRef = collection(db, "questions", questionId, "answers", answerDoc.id, "ratings");
+      try {
+        const answerRatingsSnap = await getDocs(answerRatingsRef);
+        for (const ratingDoc of answerRatingsSnap.docs) {
+          const ratingData = ratingDoc.data();
+          const stars = Number(ratingData?.value || ratingData?.stars || 0);
+          if (isValidStars(stars)) {
+            const raterId = ratingDoc.id;
+            if (raterId !== answerAuthorId) {
+              const xpGranted = getXpByStars(stars);
+              answerAuthorXpMap[answerAuthorId] = (answerAuthorXpMap[answerAuthorId] || 0) + xpGranted;
+            }
+          }
+        }
+      } catch (e: any) {
+        console.warn(`[deleteQuestion] ⚠️ No se pudieron leer ratings de respuesta ${answerDoc.id} (best-effort): ${safeErr(e)}`);
+      }
+    }
+
+    await runTransaction(db, async (tx) => {
+      // ============================================
+      // PHASE 1: ALL READS FIRST (MANDATORY)
+      // ============================================
+      
+      // Read question author's user and publicProfile documents
+      const userSnap = userRef ? await tx.get(userRef) : null;
+      const publicProfileRef = authorId ? doc(db, "publicProfiles", authorId) : null;
+      const publicProfileSnap = publicProfileRef ? await tx.get(publicProfileRef) : null;
+
+      // Read all answer authors' user and publicProfile documents
+      const answerAuthorSnaps: Record<string, { userSnap: any; publicProfileSnap: any }> = {};
+      for (const [answerAuthorId] of Object.entries(answerAuthorXpMap)) {
+        if (answerAuthorId) {
+          const answerUserRef = doc(db, "users", answerAuthorId);
+          const answerPublicProfileRef = doc(db, "publicProfiles", answerAuthorId);
+          answerAuthorSnaps[answerAuthorId] = {
+            userSnap: await tx.get(answerUserRef),
+            publicProfileSnap: await tx.get(answerPublicProfileRef),
+          };
+        }
+      }
+
+      // Read all saved users' documents
+      const savedUserSnaps: Record<string, { userSnap: any; publicProfileSnap: any }> = {};
+      for (const userId of savedUserIds) {
+        if (userId) {
+          const savedUserRef = doc(db, "users", userId);
+          const savedPublicProfileRef = doc(db, "publicProfiles", userId);
+          savedUserSnaps[userId] = {
+            userSnap: await tx.get(savedUserRef),
+            publicProfileSnap: await tx.get(savedPublicProfileRef),
+          };
+        }
+      }
+
+      // Read all followed users' documents
+      const followedUserSnaps: Record<string, { userSnap: any; publicProfileSnap: any }> = {};
+      for (const userId of followedUserIds) {
+        if (userId) {
+          const followedUserRef = doc(db, "users", userId);
+          const followedPublicProfileRef = doc(db, "publicProfiles", userId);
+          followedUserSnaps[userId] = {
+            userSnap: await tx.get(followedUserRef),
+            publicProfileSnap: await tx.get(followedPublicProfileRef),
+          };
+        }
+      }
+
+      // ✅ NOTE: avgRating calculation is moved OUTSIDE the transaction
+      // to avoid read/write order violations. It will be recalculated after deletion completes.
+
+      // ============================================
+      // PHASE 2: ALL CALCULATIONS IN MEMORY
+      // ============================================
+      
+      // Calculate new questionsCount for question author
+      const newQuestionsCount = userSnap?.exists() 
+        ? Math.max(0, (userSnap.data()?.questionsCount ?? 0) - 1)
+        : 0;
+
+      // Calculate new savedCount for all saved users
+      const savedCountUpdates: Record<string, number> = {};
+      for (const [userId, snaps] of Object.entries(savedUserSnaps)) {
+        if (snaps.userSnap.exists()) {
+          savedCountUpdates[userId] = Math.max(0, (snaps.userSnap.data()?.savedCount ?? 0) - 1);
+        }
+      }
+
+      // Calculate new followedCount for all followed users
+      const followedCountUpdates: Record<string, number> = {};
+      for (const [userId, snaps] of Object.entries(followedUserSnaps)) {
+        if (snaps.userSnap.exists()) {
+          followedCountUpdates[userId] = Math.max(0, (snaps.userSnap.data()?.followedCount ?? 0) - 1);
+        }
+      }
+
+      // ============================================
+      // PHASE 3: ALL WRITES LAST (AFTER ALL READS)
+      // ============================================
+
+      // Delete all answers
+      for (const a of answersSnap.docs) tx.delete(a.ref);
+      
+      // Delete question
+      tx.delete(questionRef);
+
+      // Subtract XP granted by this question's ratings
+      if (authorId && totalXpToSubtract > 0 && userRef && publicProfileRef) {
+        syncXpChangeWithSnapshots(
+          tx,
+          db,
+          authorId,
+          userSnap || { exists: () => false, data: () => ({}) },
+          publicProfileSnap || { exists: () => false, data: () => ({}) },
+          -totalXpToSubtract,
+          ""
+        );
+        console.log(`[deleteQuestionWithSideEffects] XP revertido: ${totalXpToSubtract} XP restado de usuario ${authorId} por eliminación de pregunta ${questionId}`);
+      } else if (authorId && totalXpToSubtract > 0) {
+        console.warn(`[deleteQuestionWithSideEffects] ⚠️ No se pudo revertir XP (${totalXpToSubtract}) - userRef o publicProfileRef faltantes`);
+      }
+
+      // Subtract XP granted by all answer ratings
+      for (const [answerAuthorId, xpToSubtract] of Object.entries(answerAuthorXpMap)) {
+        if (xpToSubtract > 0 && answerAuthorSnaps[answerAuthorId]) {
+          const snaps = answerAuthorSnaps[answerAuthorId];
+          syncXpChangeWithSnapshots(
+            tx,
+            db,
+            answerAuthorId,
+            snaps.userSnap || { exists: () => false, data: () => ({}) },
+            snaps.publicProfileSnap || { exists: () => false, data: () => ({}) },
+            -xpToSubtract,
+            ""
+          );
+          console.log(`[deleteQuestionWithSideEffects] XP revertido: ${xpToSubtract} XP restado de usuario ${answerAuthorId} por eliminación de respuestas en pregunta ${questionId}`);
+        }
+      }
+
+      // Update questionsCount for question author (users and publicProfiles)
+      if (userRef && userSnap?.exists()) {
+        tx.update(userRef, {
+          questionsCount: newQuestionsCount,
+          updatedAt: serverTimestamp(),
+        });
+        
+        // Update also in publicProfiles
+        if (publicProfileRef && publicProfileSnap?.exists()) {
+          tx.update(publicProfileRef, {
+            questionsCount: newQuestionsCount,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      }
+
+      // Decrement savedCount for all users who saved this question
+      for (const [userId, newSavedCount] of Object.entries(savedCountUpdates)) {
+        const savedUserRef = doc(db, "users", userId);
+        const savedPublicProfileRef = doc(db, "publicProfiles", userId);
+        const snaps = savedUserSnaps[userId];
+        
+        if (snaps?.userSnap.exists()) {
+          tx.update(savedUserRef, {
+            savedCount: newSavedCount,
+            updatedAt: serverTimestamp(),
+          });
+          
+          // Update also in publicProfiles if exists
+          if (snaps.publicProfileSnap.exists()) {
+            tx.update(savedPublicProfileRef, {
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      // Decrement followedCount for all users who follow this question
+      for (const [userId, newFollowedCount] of Object.entries(followedCountUpdates)) {
+        const followedUserRef = doc(db, "users", userId);
+        const followedPublicProfileRef = doc(db, "publicProfiles", userId);
+        const snaps = followedUserSnaps[userId];
+        
+        if (snaps?.userSnap.exists()) {
+          tx.update(followedUserRef, {
+            followedCount: newFollowedCount,
+            updatedAt: serverTimestamp(),
+          });
+          
+          // Update also in publicProfiles if exists
+          if (snaps.publicProfileSnap.exists()) {
+            tx.update(followedPublicProfileRef, {
+              updatedAt: serverTimestamp(),
+            });
+          }
+        }
+      }
+
+      // ✅ NOTE: avgRating update is moved OUTSIDE the transaction
+      // to avoid read/write order violations
+    }).catch((e: any) => {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para eliminar esta pregunta");
+      throw new ServiceError("questions/delete-failed", `Error al eliminar la pregunta: ${safeErr(e)}`);
     });
 
-    // Actualizar contador del usuario
-    const authorId = answerDoc.data().authorId;
+    // ✅ Recalculate avgRating AFTER transaction completes (best-effort, outside transaction)
+    // This includes BOTH question and answer ratings, excluding the deleted question
     if (authorId) {
-      const userRef = doc(db, "users", authorId);
-      await updateDoc(userRef, {
-        answersCount: increment(-1),
+      try {
+        const newAvgRating = await this.calculateAvgRatingIncludingAnswers(authorId, questionId);
+        const userRef = doc(db, "users", authorId);
+        const publicProfileRef = doc(db, "publicProfiles", authorId);
+        
+        // Update in users/{userId}
+        await updateDoc(userRef, {
+          avgRating: newAvgRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          const existingSnap = await getDoc(userRef);
+          if (!existingSnap.exists()) {
+            await setDoc(userRef, {
+              avgRating: newAvgRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+
+        // Update in publicProfiles/{userId}
+        await updateDoc(publicProfileRef, {
+          avgRating: newAvgRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          const existingSnap = await getDoc(publicProfileRef);
+          if (!existingSnap.exists()) {
+            await setDoc(publicProfileRef, {
+              uid: authorId,
+              userId: authorId,
+              avgRating: newAvgRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+
+        console.log(`[deleteQuestionWithSideEffects] ✓ avgRating actualizado fuera de transacción para autor ${authorId}: ${newAvgRating} (pregunta ${questionId} excluida, incluye ratings de preguntas y respuestas)`);
+      } catch (e: any) {
+        console.warn(`[deleteQuestionWithSideEffects] ⚠️ Error actualizando avgRating fuera de transacción (best-effort): ${safeErr(e)}`);
+      }
+    }
+  }
+
+  // ✅ DOMAIN FUNCTION: Delete answer with all side effects
+  // - Reverts XP from answer ratings
+  // - Updates answersCount and publicProfiles
+  async deleteAnswerWithSideEffects(questionId: string, answerId: string, actor: User): Promise<void> {
+    requireDb();
+    const uid = requireAuthUid();
+
+    const q = await this.getQuestionById(questionId);
+    if (!q) throw new ServiceError("questions/not-found", "Pregunta no encontrada");
+
+    const answer = q.answers.find((a) => a.id === answerId);
+    if (!answer) throw new ServiceError("questions/not-found", "Respuesta no encontrada");
+
+    const isAdmin = actor?.role === "ADMIN";
+    if (!isAdmin && answer.authorId !== uid) {
+      throw new ServiceError("validation/invalid-argument", "Solo el autor o administradores pueden eliminar respuestas");
+    }
+
+    const answerRef = doc(db, FIRESTORE_PATHS.answer(questionId, answerId));
+    const authorId = answer.authorId;
+    const userRef = authorId ? doc(db, "users", authorId) : null;
+
+    // Calculate total XP granted by this answer's ratings
+    const ratingsRef = collection(db, "questions", questionId, "answers", answerId, "ratings");
+    let totalXpToSubtract = 0;
+    try {
+      const ratingsSnap = await getDocs(ratingsRef);
+      for (const ratingDoc of ratingsSnap.docs) {
+        const ratingData = ratingDoc.data();
+        const stars = Number(ratingData?.value || ratingData?.stars || 0);
+        if (isValidStars(stars)) {
+          const raterId = ratingDoc.id;
+          if (raterId !== authorId) {
+            const xpGranted = getXpByStars(stars);
+            totalXpToSubtract += xpGranted;
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn(`[deleteAnswer] ⚠️ No se pudieron leer ratings para calcular XP a revertir (best-effort): ${safeErr(e)}`);
+    }
+
+    await runTransaction(db, async (tx) => {
+      // ============================================
+      // PHASE 1: ALL READS FIRST (MANDATORY)
+      // ============================================
+      
+      const userSnap = userRef ? await tx.get(userRef) : null;
+      const publicProfileRef = authorId ? doc(db, "publicProfiles", authorId) : null;
+      const publicProfileSnap = publicProfileRef ? await tx.get(publicProfileRef) : null;
+
+      // ============================================
+      // PHASE 2: ALL CALCULATIONS IN MEMORY
+      // ============================================
+      
+      // Calculate new XP, level, rank (if XP needs to be reverted)
+      let newXp = 0;
+      let newLevel = 1;
+      let newRank = "Novato";
+      if (authorId && totalXpToSubtract > 0 && userSnap?.exists()) {
+        const currentXp = Number(userSnap.data()?.xp || 0);
+        newXp = Math.max(0, currentXp - totalXpToSubtract);
+        newLevel = calculateLevel(newXp);
+        newRank = calculateRank(newLevel);
+      } else if (authorId && userSnap?.exists()) {
+        // Keep existing values if no XP to subtract
+        newXp = Number(userSnap.data()?.xp || 0);
+        newLevel = Number(userSnap.data()?.level || 1);
+        newRank = userSnap.data()?.rank || "Novato";
+      }
+
+      // Calculate new answersCount
+      const newAnswersCount = userSnap?.exists() 
+        ? Math.max(0, (userSnap.data()?.answersCount ?? 0) - 1)
+        : 0;
+
+      // ============================================
+      // PHASE 3: ALL WRITES LAST (AFTER ALL READS)
+      // ============================================
+
+      // Delete answer
+      tx.delete(answerRef);
+
+      // ✅ Update users/{userId} with ALL changes in a SINGLE update (XP, level, rank, answersCount)
+      // This prevents failed-precondition errors from multiple updates to the same document
+      if (userRef && userSnap?.exists()) {
+        const updateData: any = {
+          answersCount: newAnswersCount,
+          updatedAt: serverTimestamp(),
+        };
+        
+        // Include XP, level, rank if XP was reverted
+        if (authorId && totalXpToSubtract > 0) {
+          updateData.xp = newXp;
+          updateData.level = newLevel;
+          updateData.rank = newRank;
+        }
+        
+        tx.update(userRef, updateData);
+        
+        if (authorId && totalXpToSubtract > 0) {
+          console.log(`[deleteAnswerWithSideEffects] XP revertido: ${totalXpToSubtract} XP restado de usuario ${authorId} por eliminación de respuesta ${answerId}`);
+        }
+      } else if (authorId && totalXpToSubtract > 0) {
+        console.warn(`[deleteAnswerWithSideEffects] ⚠️ No se pudo revertir XP (${totalXpToSubtract}) - userRef o userSnap faltantes`);
+      }
+      
+      // ✅ Update publicProfiles/{userId} with ALL changes in a SINGLE update (XP, level, rank, answersCount)
+      // This prevents failed-precondition errors from multiple updates to the same document
+      if (publicProfileRef && publicProfileSnap?.exists()) {
+        const updateData: any = {
+          answersCount: newAnswersCount,
+          updatedAt: serverTimestamp(),
+        };
+        
+        // Include XP, level, rank if XP was reverted
+        if (authorId && totalXpToSubtract > 0) {
+          updateData.xp = newXp;
+          updateData.level = newLevel;
+          updateData.rank = newRank;
+        }
+        
+        tx.update(publicProfileRef, updateData);
+      }
+    }).catch((e: any) => {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para eliminar esta respuesta");
+      throw new ServiceError("answers/delete-failed", `Error al eliminar la respuesta: ${safeErr(e)}`);
+    });
+
+    // ✅ Recalculate avgRating AFTER transaction completes (best-effort, outside transaction)
+    // This includes BOTH question and answer ratings, excluding the deleted answer
+    if (authorId) {
+      try {
+        const newAvgRating = await this.calculateAvgRatingIncludingAnswers(authorId, undefined, answerId);
+        const userRef = doc(db, "users", authorId);
+        const publicProfileRef = doc(db, "publicProfiles", authorId);
+        
+        // Update in users/{userId}
+        await updateDoc(userRef, {
+          avgRating: newAvgRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          const existingSnap = await getDoc(userRef);
+          if (!existingSnap.exists()) {
+            await setDoc(userRef, {
+              avgRating: newAvgRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+
+        // Update in publicProfiles/{userId}
+        await updateDoc(publicProfileRef, {
+          avgRating: newAvgRating,
+          updatedAt: serverTimestamp(),
+        }).catch(async (e: any) => {
+          const existingSnap = await getDoc(publicProfileRef);
+          if (!existingSnap.exists()) {
+            await setDoc(publicProfileRef, {
+              uid: authorId,
+              userId: authorId,
+              avgRating: newAvgRating,
+              updatedAt: serverTimestamp(),
+            }, { merge: true });
+          } else {
+            throw e;
+          }
+        });
+
+        console.log(`[deleteAnswerWithSideEffects] ✓ avgRating actualizado fuera de transacción para autor ${authorId}: ${newAvgRating} (respuesta ${answerId} excluida)`);
+      } catch (e: any) {
+        console.warn(`[deleteAnswerWithSideEffects] ⚠️ Error actualizando avgRating fuera de transacción (best-effort): ${safeErr(e)}`);
+      }
+    }
+
+    const qRef = doc(db, FIRESTORE_PATHS.QUESTIONS, questionId);
+    updateDoc(qRef, { answersCount: increment(-1), updatedAt: serverTimestamp() }).catch(() => {});
+  }
+
+  // Legacy alias for backward compatibility
+  async deleteQuestion(questionId: string, actor: User): Promise<void> {
+    return this.deleteQuestionWithSideEffects(questionId, actor);
+  }
+
+  // Legacy alias for backward compatibility
+  async deleteAnswer(questionId: string, answerId: string, actor: User): Promise<void> {
+    return this.deleteAnswerWithSideEffects(questionId, answerId, actor);
+  }
+
+  async addReply(input: { questionId: string; answerId: string; content: string }, author: User): Promise<Reply> {
+    requireDb();
+    const uid = requireAuthUid();
+
+    const content = input.content.trim();
+    if (content.length < 2) throw new ServiceError("validation/invalid-argument", "La respuesta es muy corta");
+
+    let authorName = (author?.name || "").trim() || "Usuario";
+    try {
+      const u = await getDoc(doc(db, "users", uid));
+      if (u.exists()) {
+        const ud = u.data();
+        authorName = (ud?.name || ud?.displayName || authorName).trim() || authorName;
+      }
+    } catch {}
+
+    const repliesRef = collection(db, "questions", input.questionId, "answers", input.answerId, "replies");
+    const replyRef = doc(repliesRef);
+
+    const payload = {
+      questionId: input.questionId,
+      answerId: input.answerId,
+      content,
+      authorId: uid,
+      authorName,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      await setDoc(replyRef, payload);
+    } catch (e: any) {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para crear replies en esta respuesta");
+      throw new ServiceError("replies/create-failed", `Error al crear el reply: ${safeErr(e)}`);
+    }
+
+    try {
+      const replies = await this.listReplies(input.questionId, input.answerId);
+      const r = replies.find((x) => x.id === replyRef.id);
+      if (r) return r;
+    } catch {}
+
+    const now = nowIso();
+    return {
+      id: replyRef.id,
+      questionId: input.questionId,
+      answerId: input.answerId,
+      content,
+      authorId: uid,
+      authorName,
+      createdAt: now,
+      updatedAt: now,
+    };
+  }
+
+  async listReplies(questionId: string, answerId: string): Promise<Reply[]> {
+    requireDb();
+
+    const replies: Reply[] = [];
+    const ref = collection(db, "questions", questionId, "answers", answerId, "replies");
+
+    let snap;
+    try {
+      snap = await getDocs(query(ref, orderBy("createdAt", "asc")));
+    } catch (e: any) {
+      console.warn(`[listReplies] orderBy fallback: ${safeErr(e)}`);
+      snap = await getDocs(ref);
+    }
+
+    for (const d of snap.docs) {
+      const r = d.data();
+      replies.push({
+        id: d.id,
+        questionId: r.questionId || questionId,
+        answerId: r.answerId || answerId,
+        content: r.content || "",
+        authorId: r.authorId || "",
+        authorName: r.authorName || "Usuario",
+        createdAt: this.timestampToIso(r.createdAt),
+        updatedAt: this.timestampToIso(r.updatedAt),
       });
+    }
+
+    replies.sort((a, b) => (a.createdAt < b.createdAt ? -1 : 1));
+    return replies;
+  }
+
+  async deleteReply(questionId: string, answerId: string, replyId: string, actor: User): Promise<void> {
+    requireDb();
+    const uid = requireAuthUid();
+
+    const ref = doc(db, "questions", questionId, "answers", answerId, "replies", replyId);
+    const snap = await getDoc(ref);
+
+    if (!snap.exists()) throw new ServiceError("questions/not-found", "Reply no encontrado");
+
+    const data = snap.data();
+    const isAdmin = actor?.role === "ADMIN";
+    if (!isAdmin && data?.authorId !== uid) {
+      throw new ServiceError("validation/invalid-argument", "Solo el autor o un administrador puede borrar este reply");
+    }
+
+    try {
+      await deleteDoc(ref);
+    } catch (e: any) {
+      if (e?.code === "permission-denied") throw new ServiceError("permission-denied", "No tienes permisos para eliminar este reply");
+      throw new ServiceError("replies/delete-failed", `Error al eliminar el reply: ${safeErr(e)}`);
     }
   }
 
   reset(): void {
-    // No hay nada que resetear en Firestore (esto es para testing)
+    // no-op
   }
 }
-

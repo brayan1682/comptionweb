@@ -76,14 +76,47 @@ class QuestionsService {
     return this.repo.syncQuestionsCount(userId);
   }
 
-  deleteQuestion(questionId: string, adminUser: User | null) {
+  syncAnswersCount(userId: string) {
+    return this.repo.syncAnswersCount(userId);
+  }
+
+  recalculateStats(userId: string) {
+    return this.repo.recalculateStats(userId);
+  }
+
+  // ✅ DOMAIN FUNCTION: Delete question with all side effects
+  deleteQuestionWithSideEffects(questionId: string, adminUser: User | null) {
     if (!adminUser) throw new ServiceError("auth/not-authenticated", "Debes iniciar sesión");
-    return this.repo.deleteQuestion(questionId, adminUser);
+    return this.repo.deleteQuestionWithSideEffects(questionId, adminUser);
+  }
+
+  // ✅ DOMAIN FUNCTION: Delete answer with all side effects
+  deleteAnswerWithSideEffects(questionId: string, answerId: string, adminUser: User | null) {
+    if (!adminUser) throw new ServiceError("auth/not-authenticated", "Debes iniciar sesión");
+    return this.repo.deleteAnswerWithSideEffects(questionId, answerId, adminUser);
+  }
+
+  // Legacy aliases for backward compatibility (deprecated - use WithSideEffects versions)
+  deleteQuestion(questionId: string, adminUser: User | null) {
+    return this.deleteQuestionWithSideEffects(questionId, adminUser);
   }
 
   deleteAnswer(questionId: string, answerId: string, adminUser: User | null) {
+    return this.deleteAnswerWithSideEffects(questionId, answerId, adminUser);
+  }
+
+  addReply(input: { questionId: string; answerId: string; content: string }, author: User | null) {
+    if (!author) throw new ServiceError("auth/not-authenticated", "Debes iniciar sesión");
+    return this.repo.addReply(input, author);
+  }
+
+  listReplies(questionId: string, answerId: string) {
+    return this.repo.listReplies(questionId, answerId);
+  }
+
+  deleteReply(questionId: string, answerId: string, replyId: string, adminUser: User | null) {
     if (!adminUser) throw new ServiceError("auth/not-authenticated", "Debes iniciar sesión");
-    return this.repo.deleteAnswer(questionId, answerId, adminUser);
+    return this.repo.deleteReply(questionId, answerId, replyId, adminUser);
   }
 
   reset() {

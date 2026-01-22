@@ -48,7 +48,23 @@ export class InMemoryAuthRepository implements AuthRepository {
     if (exists) throw new ServiceError("auth/email-already-in-use", "Este correo ya está en uso");
 
     const now = nowIso();
-    const user: StoredUser = { id: newId(), name, email, role: "USER", createdAt: now, updatedAt: now, password };
+    const user: StoredUser = {
+      id: newId(),
+      name,
+      email,
+      role: "USER",
+      level: 1,
+      xp: 0,
+      rank: "Novato",
+      questionsCount: 0,
+      answersCount: 0,
+      savedCount: 0,
+      followedCount: 0,
+      avgRating: 0,
+      createdAt: now,
+      updatedAt: now,
+      password,
+    };
     this.users.push(user);
     this.currentUserId = user.id;
     this.emit();

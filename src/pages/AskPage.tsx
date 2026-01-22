@@ -68,16 +68,42 @@ export function AskPage() {
         setLoading(false);
         return;
       }
+      console.log("[AskPage] Creando pregunta...");
       const q = await createQuestion({ title, description, isAnonymous, category, tags: selectedTags });
-      // Limpiar el estado de error si la creación fue exitosa
+      
+      console.log("[AskPage] Pregunta creada:");
+      console.log("[AskPage] q:", q);
+      console.log("[AskPage] q.id:", JSON.stringify(q?.id));
+      console.log("[AskPage] Tipo de q.id:", typeof q?.id);
+      
       setError(null);
-      // Solo redirigir después de que Firestore confirme la creación
-      // El id ya viene del documento creado en Firestore (questionRef.id)
-      if (q && q.id) {
-        navigate(`/question/${q.id}`, { replace: true });
-      } else {
-        setError("No se pudo obtener el ID de la pregunta creada");
+      
+      // Validación: El ID debe existir y ser un string
+      if (!q) {
+        const error = "No se recibió pregunta del servidor";
+        console.error("[AskPage] ❌ ERROR:", error);
+        setError(error);
+        return;
       }
+      
+      if (!q.id) {
+        const error = "La pregunta no tiene ID";
+        console.error("[AskPage] ❌ ERROR:", error);
+        setError(error);
+        return;
+      }
+      
+      if (typeof q.id !== "string") {
+        const error = `ID inválido (tipo: ${typeof q.id})`;
+        console.error("[AskPage] ❌ ERROR:", error);
+        setError(error);
+        return;
+      }
+      
+      // Usar el ID exactamente como viene - NO modificar
+      const url = `/question/${q.id}`;
+      console.log("[AskPage] Navegando a:", url);
+      navigate(url, { replace: true });
     } catch (err) {
       // Solo mostrar error si realmente falló la creación
       if (err instanceof ServiceError) {

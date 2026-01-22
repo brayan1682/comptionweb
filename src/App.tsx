@@ -18,63 +18,73 @@ import { ExplorePage } from "./pages/ExplorePage";
 import { AskPage } from "./pages/AskPage";
 import { QuestionDetailPage } from "./pages/QuestionDetailPage";
 import { ProfilePage } from "./pages/ProfilePage";
+import { PublicProfilePage } from "./pages/PublicProfilePage";
 import { AdminPage } from "./pages/AdminPage";
 import { HelpPage } from "./pages/HelpPage";
+import { SavedQuestionsPage } from "./pages/SavedQuestionsPage";
+import { FollowedQuestionsPage } from "./pages/FollowedQuestionsPage";
 import { NotFoundPage } from "./pages/NotFoundPage";
 import { AdminRoute } from "./routes/AdminRoute";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { initializeFirestore } from "./firebase/initFirestore";
 
 export default function App() {
-  // Inicializar Firestore al cargar la app (categorías y tags)
   useEffect(() => {
     initializeFirestore().catch((error) => {
       console.error("Error inicializando Firestore:", error);
     });
   }, []);
+
   return (
     <ErrorBoundary>
       <AuthProvider>
-      <ReputationProvider>
-        <UserDataProvider>
-          <ReportsProvider>
-            <QuestionsProvider>
-              <NotificationsProvider>
-          <Routes>
-            {/* Públicas */}
-            <Route path="/" element={<LandingPage />} />
-            <Route element={<PublicOnlyRoute />}>
-              <Route path="/login" element={<LoginPage />} />
-              <Route path="/register" element={<RegisterPage />} />
-            </Route>
-            <Route element={<ProtectedRoute />}>
-              <Route path="/welcome" element={<WelcomePage />} />
-            </Route>
+        <ReputationProvider>
+          <UserDataProvider>
+            <ReportsProvider>
+              <QuestionsProvider>
+                <NotificationsProvider>
+                  <Routes>
+                    {/* Públicas */}
+                    <Route path="/" element={<LandingPage />} />
 
-            {/* Privadas */}
-            <Route element={<ProtectedRoute />}>
-              <Route element={<PrivateLayout />}>
-                <Route path="/home" element={<HomePage />} />
-                <Route path="/explore" element={<ExplorePage />} />
-                <Route path="/ask" element={<AskPage />} />
-                <Route path="/question/:id" element={<QuestionDetailPage />} />
-                <Route path="/profile" element={<ProfilePage />} />
-                <Route path="/help" element={<HelpPage />} />
-              </Route>
-              <Route element={<AdminRoute />}>
-                <Route path="/admin" element={<AdminPage />} />
-              </Route>
-            </Route>
+                    {/* ✅ Detalle de pregunta PUBLICO (para evitar "no encontrada" por auth/refresh) */}
+                    <Route path="/question/:id" element={<QuestionDetailPage />} />
+                    {/* ✅ Perfil público (accesible sin autenticación) */}
+                    <Route path="/profile/:userId" element={<PublicProfilePage />} />
 
-            <Route path="/404" element={<NotFoundPage />} />
-            <Route path="*" element={<Navigate to="/404" replace />} />
-          </Routes>
-              </NotificationsProvider>
-            </QuestionsProvider>
-          </ReportsProvider>
-        </UserDataProvider>
-      </ReputationProvider>
-    </AuthProvider>
+                    <Route element={<PublicOnlyRoute />}>
+                      <Route path="/login" element={<LoginPage />} />
+                      <Route path="/register" element={<RegisterPage />} />
+                    </Route>
+
+                    <Route element={<ProtectedRoute />}>
+                      <Route path="/welcome" element={<WelcomePage />} />
+
+                      {/* Privadas */}
+                      <Route element={<PrivateLayout />}>
+                        <Route path="/home" element={<HomePage />} />
+                        <Route path="/explore" element={<ExplorePage />} />
+                        <Route path="/ask" element={<AskPage />} />
+                        <Route path="/profile" element={<ProfilePage />} />
+                        <Route path="/saved" element={<SavedQuestionsPage />} />
+                        <Route path="/followed" element={<FollowedQuestionsPage />} />
+                        <Route path="/help" element={<HelpPage />} />
+                      </Route>
+
+                      <Route element={<AdminRoute />}>
+                        <Route path="/admin" element={<AdminPage />} />
+                      </Route>
+                    </Route>
+
+                    <Route path="/404" element={<NotFoundPage />} />
+                    <Route path="*" element={<Navigate to="/404" replace />} />
+                  </Routes>
+                </NotificationsProvider>
+              </QuestionsProvider>
+            </ReportsProvider>
+          </UserDataProvider>
+        </ReputationProvider>
+      </AuthProvider>
     </ErrorBoundary>
   );
 }

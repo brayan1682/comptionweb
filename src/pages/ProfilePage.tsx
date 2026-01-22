@@ -8,12 +8,12 @@ import { useReputation } from "../app/providers/ReputationProvider";
 import { useUserData } from "../app/providers/UserDataProvider";
 import { ServiceError } from "../services/errors";
 import { questionsService } from "../services/questions/questionsService";
-import { xpForNextLevel, xpRequiredForLevel, xpNeededForNextLevel, getLevelProgress } from "../services/reputation/reputationUtils";
+import { xpRequiredForLevel, xpNeededForNextLevel, getLevelProgress } from "../services/reputation/reputationUtils";
 
 type ProfileTab = "view" | "edit" | "password";
 
 export function ProfilePage() {
-  const { user, updateProfile, changePassword, logout, refreshUser } = useAuth();
+  const { user, updateProfile, changePassword, logout } = useAuth();
   const { listMyQuestions, listMyAnswers, reset: resetQuestions } = useQuestions();
   const { notifications, unreadCount, markRead, markAllRead, refresh: refreshNotifications, reset: resetNotifications } =
     useNotifications();
@@ -49,13 +49,12 @@ export function ProfilePage() {
     (async () => {
       if (!user) return;
 
-      // Sincronizar questionsCount con las preguntas reales en Firestore
+      // Recalcular todas las estadísticas para asegurar consistencia
       try {
-        await questionsService.syncQuestionsCount(user.id);
-        // Refrescar el usuario para obtener estadísticas actualizadas desde Firestore
-        await refreshUser();
+        await questionsService.recalculateStats(user.id);
+        // ✅ NO llamar a refreshUser() - AuthProvider usa onSnapshot y se actualiza automáticamente
       } catch (refreshError) {
-        console.warn("No se pudo sincronizar estadísticas en el perfil:", refreshError);
+        console.warn("No se pudo recalcular estadísticas en el perfil:", refreshError);
       }
 
       const qs = await listMyQuestions();
@@ -215,11 +214,11 @@ export function ProfilePage() {
           <section style={{ marginBottom: "30px", padding: "20px", background: "#f9f9f9", borderRadius: "8px" }}>
             <h2 style={{ marginTop: 0, marginBottom: "20px" }}>Estadísticas y Reputación</h2>
             {(() => {
-              // Usar datos de reputación si existen, sino usar datos del usuario con valores por defecto
-              const level = reputation?.level ?? user?.level ?? 1;
-              const xp = reputation?.xp ?? user?.xp ?? 0;
-              const rank = reputation?.rank ?? user?.rank ?? "Novato";
-              const trophiesCount = reputation?.trophiesCount ?? 0;
+              // ✅ SINGLE SOURCE OF TRUTH: users/{userId} del AuthProvider (reactivo via onSnapshot)
+              const level = user?.level ?? 1;
+              const xp = user?.xp ?? 0;
+              const rank = user?.rank ?? "Novato";
+              const trophiesCount = reputation?.trophiesCount ?? 0; // TODO: Agregar a users/{userId} si es necesario
               
               return (
               <div>
@@ -235,6 +234,24 @@ export function ProfilePage() {
                         {xpNeededForNextLevel(level, xp)} XP para siguiente nivel
                       </p>
                     </div>
+                  </div>
+                  <div style={{ marginTop: "12px" }}>
+                    <Link
+                      to="/help#xp"
+                      style={{
+                        display: "inline-block",
+                        padding: "8px 16px",
+                        background: "#f8f9fa",
+                        color: "#007bff",
+                        textDecoration: "none",
+                        borderRadius: "6px",
+                        fontSize: "14px",
+                        fontWeight: "500",
+                        border: "1px solid #007bff"
+                      }}
+                    >
+                      ¿Cómo funciona la XP? →
+                    </Link>
                   </div>
                   
                   {/* Barra de XP estilo Fortnite */}
@@ -302,8 +319,67 @@ export function ProfilePage() {
                 </div>
                 
                 <div style={{ padding: "16px", background: "#fff", borderRadius: "8px", border: "1px solid #ddd" }}>
-                  <p style={{ margin: "0 0 8px 0", fontSize: "14px", color: "#666" }}><strong>Preguntas guardadas:</strong> {savedQuestionIds.length}</p>
-                  <p style={{ margin: "0", fontSize: "14px", color: "#666" }}><strong>Preguntas seguidas:</strong> {followedQuestionIds.length}</p>
+                  {/* ✅ Usar contadores del usuario si están disponibles, sino usar arrays como fallback */}
+                  <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
+                    <Link
+                      to="/saved"
+                      style={{
+                        flex: "1",
+                        minWidth: "200px",
+                        padding: "12px 16px",
+                        background: "#f8f9fa",
+                        borderRadius: "6px",
+                        textDecoration: "none",
+                        color: "inherit",
+                        border: "1px solid #ddd",
+                        transition: "all 0.2s"
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "#e9ecef";
+                        e.currentTarget.style.borderColor = "#007bff";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "#f8f9fa";
+                        e.currentTarget.style.borderColor = "#ddd";
+                      }}
+                    >
+                      <p style={{ margin: "0 0 4px 0", fontSize: "14px", color: "#666" }}>
+                        <strong>📌 Preguntas guardadas</strong>
+                      </p>
+                      <p style={{ margin: "0", fontSize: "20px", fontWeight: "bold", color: "#007bff" }}>
+                        {user?.savedCount ?? savedQuestionIds.length}
+                      </p>
+                    </Link>
+                    <Link
+                      to="/followed"
+                      style={{
+                        flex: "1",
+                        minWidth: "200px",
+                        padding: "12px 16px",
+                        background: "#f8f9fa",
+                        borderRadius: "6px",
+                        textDecoration: "none",
+                        color: "inherit",
+                        border: "1px solid #ddd",
+                        transition: "all 0.2s"
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.background = "#e9ecef";
+                        e.currentTarget.style.borderColor = "#007bff";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = "#f8f9fa";
+                        e.currentTarget.style.borderColor = "#ddd";
+                      }}
+                    >
+                      <p style={{ margin: "0 0 4px 0", fontSize: "14px", color: "#666" }}>
+                        <strong>🔔 Preguntas seguidas</strong>
+                      </p>
+                      <p style={{ margin: "0", fontSize: "20px", fontWeight: "bold", color: "#007bff" }}>
+                        {user?.followedCount ?? followedQuestionIds.length}
+                      </p>
+                    </Link>
+                  </div>
                 </div>
               </div>
               );
@@ -365,9 +441,13 @@ export function ProfilePage() {
                 {notifications.map((n) => (
                   <li key={n.id} style={{ marginBottom: "10px", padding: "10px", background: n.readAt ? "#fff" : "#e3f2fd", borderRadius: "4px" }}>
                     <p><strong>{formatNotification(n.type)}</strong> · {n.readAt ? "Leída" : "No leída"}</p>
-                    {"questionId" in n.data ? (
+                    {n.data && typeof n.data === "object" && "questionId" in (n.data as any) ? (
                       <p>
-                        <Link to={`/question/${n.data.questionId}#answer-${n.data.answerId}`}>Ver detalle</Link>
+                        <Link
+                          to={`/question/${(n.data as any).questionId}${(n.data as any).answerId ? `#answer-${(n.data as any).answerId}` : ""}`}
+                        >
+                          Ver detalle
+                        </Link>
                       </p>
                     ) : null}
                     {!n.readAt ? (

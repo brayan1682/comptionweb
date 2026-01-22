@@ -9,18 +9,14 @@ import type { UserReputation } from "../../domain/types";
 import { nowIso } from "../utils";
 import { calculateLevel, calculateRank } from "./reputationUtils";
 import type { ReputationRepository } from "./ReputationRepository";
-import { db } from "../../firebase/firebase";
+import { db, auth } from "../../firebase/firebase";
 import { notificationsService } from "../notifications/notificationsService";
 import { levelUpNotification, rankUpNotification } from "../notifications/factories";
 
 export class FirestoreReputationRepository implements ReputationRepository {
   private timestampToIso(timestamp: any): string {
-    if (timestamp?.toDate) {
-      return timestamp.toDate().toISOString();
-    }
-    if (typeof timestamp === "string") {
-      return timestamp;
-    }
+    if (timestamp?.toDate) return timestamp.toDate().toISOString();
+    if (typeof timestamp === "string") return timestamp;
     return new Date().toISOString();
   }
 
@@ -29,11 +25,61 @@ export class FirestoreReputationRepository implements ReputationRepository {
   }
 
   async getByUserId(userId: string): Promise<UserReputation | null> {
-    const repDoc = await getDoc(doc(db, "reputation", userId));
-    if (!repDoc.exists()) {
-      // Si no existe, crear uno inicial
+    const authUid = auth.currentUser?.uid ?? null;
+
+    try {
+      // ✅ Unificar a 'reputations' según reglas
+      const repDoc = await getDoc(doc(db, "reputations", userId));
+      if (!repDoc.exists()) {
+        const now = nowIso();
+        const initialRep: UserReputation = {
+          userId,
+          xp: 0,
+          level: 1,
+          rank: "Novato",
+          trophiesCount: 0,
+          createdAt: now,
+          updatedAt: now,
+        };
+        if (authUid && authUid === userId) {
+          try {
+            // ✅ Unificar a 'reputations' según reglas
+            await setDoc(doc(db, "reputations", userId), {
+              userId: initialRep.userId,
+              xp: initialRep.xp,
+              level: initialRep.level,
+              rank: initialRep.rank,
+              trophiesCount: initialRep.trophiesCount,
+              createdAt: this.isoToTimestamp(now),
+              updatedAt: this.isoToTimestamp(now),
+            });
+          } catch (error: any) {
+            const errorCode = error?.code || "unknown";
+            console.warn(`[getByUserId] ⚠️ No se pudo crear documento de reputación (reputations/${userId}): ${errorCode} - ${error.message || error}`);
+          }
+        }
+        return initialRep;
+      }
+
+      const data = repDoc.data();
+      return {
+        userId: data.userId,
+        xp: data.xp || 0,
+        level: data.level || 1,
+        rank: data.rank || "Novato",
+        trophiesCount: data.trophiesCount || 0,
+        createdAt: this.timestampToIso(data.createdAt),
+        updatedAt: this.timestampToIso(data.updatedAt),
+      };
+    } catch (error: any) {
+      const errorCode = error?.code || "unknown";
+      // ✅ Solo loggear si no es permission-denied esperado (cuando no hay auth o no es el dueño)
+      if (errorCode !== "permission-denied") {
+        console.warn(`[getByUserId] ⚠️ Error leyendo reputación (reputations/${userId}): ${errorCode} - ${error?.message || error}`);
+      }
+      // ✅ Fallback tolerante: retornar defaults sin romper UI
       const now = nowIso();
-      const initialRep: UserReputation = {
+      return {
         userId,
         xp: 0,
         level: 1,
@@ -42,30 +88,33 @@ export class FirestoreReputationRepository implements ReputationRepository {
         createdAt: now,
         updatedAt: now,
       };
-      await setDoc(doc(db, "reputation", userId), {
-        ...initialRep,
-        createdAt: this.isoToTimestamp(now),
-        updatedAt: this.isoToTimestamp(now),
-      });
-      return initialRep;
     }
-    
-    const data = repDoc.data();
-    return {
-      userId: data.userId,
-      xp: data.xp || 0,
-      level: data.level || 1,
-      rank: data.rank || "Novato",
-      trophiesCount: data.trophiesCount || 0,
-      createdAt: this.timestampToIso(data.createdAt),
-      updatedAt: this.timestampToIso(data.updatedAt),
-    };
   }
 
   async addXp(userId: string, xpAmount: number): Promise<UserReputation> {
-    const repRef = doc(db, "reputation", userId);
+    const authUid = auth.currentUser?.uid;
+    if (!authUid) throw new Error("No autenticado");
+
+    if (userId !== authUid) {
+      console.warn(`[addXp] Intento de sumar XP a otro usuario (${userId}) desde el cliente. Se omite por seguridad.`);
+      const existing = await this.getByUserId(userId);
+      return (
+        existing ?? {
+          userId,
+          xp: 0,
+          level: 1,
+          rank: "Novato",
+          trophiesCount: 0,
+          createdAt: nowIso(),
+          updatedAt: nowIso(),
+        }
+      );
+    }
+
+    // ✅ Unificar a 'reputations' según reglas
+    const repRef = doc(db, "reputations", userId);
     const repDoc = await getDoc(repRef);
-    
+
     let currentXp = 0;
     let oldLevel = 1;
     let oldRank = "Novato";
@@ -75,11 +124,11 @@ export class FirestoreReputationRepository implements ReputationRepository {
       oldLevel = data.level || 1;
       oldRank = data.rank || "Novato";
     }
-    
+
     const newXp = currentXp + xpAmount;
     const newLevel = calculateLevel(newXp);
     const newRank = calculateRank(newLevel);
-    
+
     const now = nowIso();
     if (repDoc.exists()) {
       await updateDoc(repRef, {
@@ -100,32 +149,49 @@ export class FirestoreReputationRepository implements ReputationRepository {
       });
     }
 
-    // Actualizar también en el documento del usuario
-    const userRef = doc(db, "users", userId);
-    const userDoc = await getDoc(userRef);
-    if (userDoc.exists()) {
-      await updateDoc(userRef, {
-        xp: newXp,
-        level: newLevel,
-        rank: newRank,
-      });
+    // Best-effort sync a users/{uid} solo del propio usuario
+    if (userId === authUid) {
+      const userRef = doc(db, "users", userId);
+      const userDoc = await getDoc(userRef);
+      if (userDoc.exists()) {
+        try {
+          await updateDoc(userRef, {
+            xp: newXp,
+            level: newLevel,
+            rank: newRank,
+            updatedAt: now,
+          });
+        } catch (error: any) {
+          console.warn("[addXp] No se pudo actualizar users/{uid} (puede ser por permisos):", error.message);
+        }
+      }
     }
 
-    // Notificar si subió de nivel o rango
-    if (newLevel > oldLevel) {
-      await notificationsService.create(levelUpNotification({ userId, level: newLevel, rank: newRank }));
-    }
-    if (newRank !== oldRank) {
-      await notificationsService.create(rankUpNotification({ userId, level: newLevel, rank: newRank }));
+    if (userId === authUid) {
+      if (newLevel > oldLevel) {
+        try {
+          await notificationsService.create(levelUpNotification({ userId, level: newLevel, rank: newRank }));
+        } catch (error: any) {
+          console.warn("[addXp] No se pudo crear notificación de level-up:", error.message);
+        }
+      }
+      if (newRank !== oldRank) {
+        try {
+          await notificationsService.create(rankUpNotification({ userId, level: newLevel, rank: newRank }));
+        } catch (error: any) {
+          console.warn("[addXp] No se pudo crear notificación de rank-up:", error.message);
+        }
+      }
     }
 
-    return await this.getByUserId(userId) as UserReputation;
+    return (await this.getByUserId(userId)) as UserReputation;
   }
 
   async setTrophiesCount(userId: string, count: number): Promise<UserReputation> {
-    const repRef = doc(db, "reputation", userId);
+    // ✅ Unificar a 'reputations' según reglas
+    const repRef = doc(db, "reputations", userId);
     const repDoc = await getDoc(repRef);
-    
+
     const now = nowIso();
     if (repDoc.exists()) {
       await updateDoc(repRef, {
@@ -145,11 +211,8 @@ export class FirestoreReputationRepository implements ReputationRepository {
       });
     }
 
-    return await this.getByUserId(userId) as UserReputation;
+    return (await this.getByUserId(userId)) as UserReputation;
   }
 
-  reset(): void {
-    // No hay nada que resetear en Firestore (esto es para testing)
-  }
+  reset(): void {}
 }
-

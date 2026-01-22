@@ -1,162 +1,118 @@
 rules_version = '2';
-
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Helper function para verificar si el usuario está autenticado
-    function isAuthenticated() {
-      return request.auth != null;
+
+    // -----------------------------
+    // Helpers
+    // -----------------------------
+    function isAuth() { return request.auth != null; }
+    function uid() { return request.auth.uid; }
+    function isOwner(userId) { return isAuth() && uid() == userId; }
+
+    // Permite que SOLO cambien ciertos campos (útil para "markRead" y counters)
+    function onlyChanges(allowedKeys) {
+      return request.resource.data.diff(resource.data).changedKeys().hasOnly(allowedKeys);
     }
-    
-    // Helper function para verificar si el usuario es el propietario del documento
-    function isOwner(userId) {
-      return isAuthenticated() && request.auth.uid == userId;
+
+    function isNonNegativeIntField(field) {
+      return !(field in request.resource.data)
+        || (request.resource.data[field] is int && request.resource.data[field] >= 0);
     }
-    
-    // Helper function para verificar si el usuario es administrador
-    function isAdmin() {
-      return isAuthenticated() && 
-             exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-             get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN';
-    }
-    
-    // Colección de usuarios
-    match /users/{userId} {
-      // Lectura: solo el propio usuario o administradores
-      allow read: if isOwner(userId) || isAdmin();
-      
-      // Creación: solo durante el registro (el usuario crea su propio documento)
-      allow create: if isAuthenticated() && 
-                       request.auth.uid == userId &&
-                       request.resource.data.keys().hasAll(['uid', 'displayName', 'name', 'email', 'role', 'level', 'xp', 'rank', 'questionsCount', 'answersCount', 'avgRating', 'createdAt', 'updatedAt']);
-      
-      // Actualización: solo el propio usuario puede actualizar su perfil
-      allow update: if isOwner(userId) && 
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'displayName', 'updatedAt', 'xp', 'level', 'rank', 'questionsCount', 'answersCount', 'avgRating']);
-      
-      // Eliminación: solo administradores
-      allow delete: if isAdmin();
-    }
-    
-    // Colección de preguntas
-    match /questions/{questionId} {
-      // Lectura: pública para todos
+
+    // -----------------------------
+    // PUBLIC PROFILES (lectura pública)
+    // -----------------------------
+    match /publicProfiles/{userId} {
       allow read: if true;
-      
-      // Creación: solo usuarios autenticados
-      allow create: if isAuthenticated() &&
-                       request.resource.data.authorId == request.auth.uid &&
-                       request.resource.data.keys().hasAll(['title', 'description', 'authorId', 'authorName', 'isAnonymous', 'category', 'tags', 'createdAt', 'updatedAt', 'viewedByUserId', 'viewsCount', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'status']);
-      
-      // Actualización: solo el autor o administradores
-      allow update: if (isOwner(resource.data.authorId) || isAdmin()) &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'description', 'isAnonymous', 'category', 'tags', 'updatedAt', 'viewedByUserId', 'viewsCount', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'trophyAnswerId', 'answersCount', 'status']);
-      
-      // Eliminación: solo administradores
-      allow delete: if isAdmin();
-      
-      // Subcolección de respuestas
+
+      // El dueño puede crear/actualizar su perfil público
+      allow create, update: if isOwner(userId);
+
+      // (Opcional) impedir delete desde cliente
+      allow delete: if false;
+    }
+
+    // -----------------------------
+    // USERS (privado)
+    // -----------------------------
+    match /users/{userId} {
+      allow read, create, update, delete: if isOwner(userId);
+    }
+
+    // -----------------------------
+    // QUESTIONS (lectura pública)
+    // -----------------------------
+    match /questions/{questionId} {
+      allow read: if true;
+
+      // Crear pregunta: usuario autenticado y authorId = uid
+      allow create: if isAuth()
+        && request.resource.data.authorId == uid();
+
+      // Update:
+      // - autor puede editar todo
+      // - otros NO (para evitar abusos)
+      //
+      // Si necesitas que otros incrementen "viewsCount",
+      // hazlo vía Cloud Function o cambia a la alternativa de abajo.
+      allow update: if isAuth() && resource.data.authorId == uid();
+
+      allow delete: if isAuth() && resource.data.authorId == uid();
+
+      // -----------------------------
+      // ANSWERS (subcolección)
+      // -----------------------------
       match /answers/{answerId} {
-        // Lectura: pública
         allow read: if true;
-        
-        // Creación: solo usuarios autenticados
-        allow create: if isAuthenticated() &&
-                         request.resource.data.authorId == request.auth.uid &&
-                         request.resource.data.keys().hasAll(['questionId', 'content', 'authorId', 'authorName', 'isAnonymous', 'createdAt', 'updatedAt', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'hasTrophy']);
-        
-        // Actualización: solo el autor o administradores
-        allow update: if (isOwner(resource.data.authorId) || isAdmin()) &&
-                         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['content', 'updatedAt', 'ratingsByUserId', 'ratingAvg', 'ratingCount', 'hasTrophy']);
-        
-        // Eliminación: solo administradores
-        allow delete: if isAdmin();
+
+        allow create: if isAuth()
+          && request.resource.data.authorId == uid();
+
+        allow update, delete: if isAuth() && resource.data.authorId == uid();
+
+        // -----------------------------
+        // RATINGS (subcolección)
+        // -----------------------------
+        match /ratings/{ratingId} {
+          allow read: if true;
+
+          // Cada usuario crea su rating (userId = uid)
+          allow create: if isAuth()
+            && request.resource.data.userId == uid();
+
+          // Update/Delete solo del dueño del rating
+          allow update, delete: if isAuth() && resource.data.userId == uid();
+        }
       }
     }
-    
-    // Colección de reportes
-    match /reports/{reportId} {
-      // Lectura: solo el reportero o administradores
-      allow read: if isOwner(resource.data.reporterId) || isAdmin();
-      
-      // Creación: solo usuarios autenticados pueden crear reportes
-      allow create: if isAuthenticated() &&
-                       request.resource.data.reporterId == request.auth.uid &&
-                       request.resource.data.keys().hasAll(['reporterId', 'targetType', 'targetId', 'reason', 'description', 'status', 'createdAt']);
-      
-      // Actualización: solo administradores pueden cambiar el estado
-      allow update: if isAdmin() &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedBy', 'reviewedAt']);
-      
-      // Eliminación: solo administradores
-      allow delete: if isAdmin();
+
+    // -----------------------------
+    // NOTIFICATIONS (privado por usuario)
+    // -----------------------------
+    match /notifications/{userId}/items/{notificationId} {
+      // Solo el dueño puede leer
+      allow read: if isOwner(userId);
+
+      // Crear:
+      // - recomendado que lo haga Cloud Function
+      // - pero si lo haces desde cliente:
+      //   permite crear SOLO si "toUserId" coincide con el path userId
+      allow create: if isAuth()
+        && request.resource.data.toUserId == userId;
+
+      // Marcar como leída (update limitado)
+      allow update: if isOwner(userId)
+        && onlyChanges(["read", "readAt", "updatedAt"]);
+
+      // Delete opcional (si quieres permitir limpiar notifs)
+      allow delete: if isOwner(userId);
     }
-    
-    // Colección de notificaciones
-    match /notifications/{notificationId} {
-      // Lectura: solo el usuario propietario de la notificación
-      allow read: if isOwner(resource.data.userId);
-      
-      // Creación: el sistema puede crear notificaciones (se hace desde el código del servidor/cliente autenticado)
-      allow create: if isAuthenticated() &&
-                       request.resource.data.keys().hasAll(['id', 'userId', 'type', 'createdAt', 'readAt', 'data']);
-      
-      // Actualización: solo el usuario propietario puede marcar como leída
-      allow update: if isOwner(resource.data.userId) &&
-                       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt']);
-      
-      // Eliminación: solo el usuario propietario
-      allow delete: if isOwner(resource.data.userId);
-    }
-    
-    // Colección de reputación
-    match /reputation/{userId} {
-      // Lectura: pública (para mostrar rankings)
-      allow read: if true;
-      
-      // Creación y actualización: solo el sistema (desde el código)
-      allow create, update: if isAuthenticated();
-      
-      // Eliminación: solo administradores
-      allow delete: if isAdmin();
-    }
-    
-    // Colección de preguntas guardadas
-    match /savedQuestions/{savedId} {
-      // Lectura: solo el usuario propietario
-      allow read: if isOwner(resource.data.userId);
-      
-      // Creación: solo usuarios autenticados
-      allow create: if isAuthenticated() &&
-                       request.resource.data.userId == request.auth.uid;
-      
-      // Eliminación: solo el usuario propietario
-      allow delete: if isOwner(resource.data.userId);
-    }
-    
-    // Colección de preguntas seguidas
-    match /followedQuestions/{followedId} {
-      // Lectura: solo el usuario propietario
-      allow read: if isOwner(resource.data.userId);
-      
-      // Creación: solo usuarios autenticados
-      allow create: if isAuthenticated() &&
-                       request.resource.data.userId == request.auth.uid;
-      
-      // Eliminación: solo el usuario propietario
-      allow delete: if isOwner(resource.data.userId);
-    }
-    
-    // Colección de categorías (solo lectura pública)
-    match /categories/{categoryId} {
-      allow read: if true;
-      allow write: if false; // Solo se crean desde el código de inicialización
-    }
-    
-    // Colección de tags (solo lectura pública)
-    match /tags/{tagId} {
-      allow read: if true;
-      allow write: if false; // Solo se crean desde el código de inicialización
+
+    // -----------------------------
+    // DEFAULT: niega todo lo no contemplado
+    // -----------------------------
+    match /{document=**} {
+      allow read, write: if false;
     }
   }
 }

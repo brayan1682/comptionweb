@@ -4,8 +4,23 @@ export type ServiceErrorCode =
   | "auth/weak-password"
   | "auth/invalid-email"
   | "auth/not-authenticated"
+  | "permission-denied"
   | "questions/not-found"
   | "questions/create-failed"
+  | "questions/read-failed"
+  | "questions/verify-failed"
+  | "questions/convert-failed"
+  | "questions/id-mismatch"
+  | "answers/create-failed"
+  | "answers/update-failed"
+  | "answers/delete-failed"
+  | "questions/update-failed"
+  | "questions/delete-failed"
+  | "ratings/create-failed"
+  | "ratings/read-failed"
+  | "replies/create-failed"
+  | "replies/delete-failed"
+  | "questions/sync-failed"
   | "validation/invalid-argument";
 
 export class ServiceError extends Error {
